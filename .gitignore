@@ -2,4 +2,4 @@
 __pycache__/
 *.log
 *.DS_Store
-osu_enrollment_log_classes.db
+# osu_enrollment_log_classes.db
