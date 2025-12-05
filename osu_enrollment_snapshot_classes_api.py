@@ -23,6 +23,18 @@ import pathlib
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 
+from zoneinfo import ZoneInfo
+
+# OSU local timezone (Corvallis, OR)
+OSU_TZ = ZoneInfo("America/Los_Angeles")
+
+def osu_now() -> dt.datetime:
+    """Current datetime in OSU local time (PST/PDT)."""
+    return dt.datetime.now(dt.timezone.utc).astimezone(OSU_TZ)
+
+def osu_today() -> dt.date:
+    """Today's date in OSU local time (PST/PDT)."""
+    return osu_now().date()
 import pandas as pd
 import requests
 
@@ -108,7 +120,7 @@ def determine_term_for_today(today: Optional[dt.date] = None) -> Dict[str, Any]:
     whose classes_begin is nearest in time, and mark within_window=False.
     """
     if today is None:
-        today = dt.date.today()
+        today = osu_today()
 
     candidates: List[Dict[str, Any]] = []
 
@@ -417,7 +429,7 @@ def append_snapshot_to_db(df: pd.DataFrame, db_path: pathlib.Path) -> None:
         return
 
     df = df.copy()
-    now = dt.datetime.now()
+    now = osu_now()
     df["snapshot_date"] = now.date().isoformat()
     df["timestamp"] = now.isoformat(timespec="seconds")
 
@@ -453,6 +465,10 @@ def append_snapshot_to_db(df: pd.DataFrame, db_path: pathlib.Path) -> None:
 
     with sqlite3.connect(db_path) as conn:
         df.to_sql("enrollment", conn, if_exists="append", index=False)
+        # Ensure a friendly view name for SUS enrollment
+        conn.execute(
+            "CREATE VIEW IF NOT EXISTS sus_enrollment AS SELECT * FROM enrollment"
+        )
 
     print(f"Appended {len(df)} rows to {db_path} (table 'enrollment').")
 
@@ -460,7 +476,7 @@ def append_snapshot_to_db(df: pd.DataFrame, db_path: pathlib.Path) -> None:
 # ---------- MAIN ----------
 
 def main() -> None:
-    today = dt.date.today()
+    today = osu_today()
     term_info = determine_term_for_today(today)
 
     srcdb = term_info["srcdb"]
