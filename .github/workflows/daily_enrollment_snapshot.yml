@@ -3,7 +3,7 @@ name: Daily SUS enrollment snapshot
 on:
   # Run every day at 17:00 UTC
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '0 17 * * *'
   # Allow manual runs from the Actions tab
   workflow_dispatch: {}
 
