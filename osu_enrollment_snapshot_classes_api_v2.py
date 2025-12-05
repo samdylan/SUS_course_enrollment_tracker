@@ -29,6 +29,24 @@ from typing import Any, Dict, Iterable, List, Tuple
 import pandas as pd
 import requests
 from zoneinfo import ZoneInfo
+import sys
+
+# Ensure we can import the CoreEd snapshot helper whether it's in the repo root
+# or inside the "CoreEd Daily Tracker" subfolder.
+from pathlib import Path
+
+THIS_DIR = Path(__file__).resolve().parent
+POSSIBLE_ROOTS = [
+    THIS_DIR,
+    THIS_DIR.parent,  # repo root if this script is inside a subfolder
+    THIS_DIR / "CoreEd Daily Tracker",
+]
+for path in POSSIBLE_ROOTS:
+    helper = path / "osu_coreed_capacity_snapshot_v3.py"
+    if helper.exists():
+        sys.path.append(str(path))
+        break
+
 from osu_coreed_capacity_snapshot_v3 import build_coreed_snapshot_for_term
 
 # ---------- CONFIG ----------
