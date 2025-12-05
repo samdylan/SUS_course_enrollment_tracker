@@ -33,6 +33,8 @@ jobs:
           python osu_enrollment_snapshot_classes_api.py
 
       - name: Run CoreEd daily snapshot script
+        env:
+          PYTHONPATH: "${{ github.workspace }}"
         run: |
           python osu_enrollment_snapshot_classes_api_v2.py
 
