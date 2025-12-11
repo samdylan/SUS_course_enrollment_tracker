@@ -183,21 +183,58 @@ def build_search_payload(srcdb: str, keyword: str) -> Dict[str, Any]:
     }
 
 
-def fetch_class_search(srcdb: str, keyword: str) -> Dict[str, Any]:
-    """Call the classes.oregonstate.edu search API and return the parsed JSON."""
-    params = SEARCH_QUERY.copy()
-    params["keyword"] = keyword
+import json
+import textwrap
+import requests  # you probably already have this imported at the top
 
-    payload = build_search_payload(srcdb=srcdb, keyword=keyword)
+CLASS_SEARCH_URL = "..."  # whatever you’re already using
 
-    resp = requests.post(
-        CLASSES_API_URL,
-        params=params,
-        json=payload,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+def fetch_class_search(srcdb: str, keyword: str) -> dict:
+    """
+    Call the OSU class search API and return parsed JSON.
+
+    Adds robust error handling so that if the endpoint returns HTML,
+    an empty body, or some other non-JSON response, we get a clear
+    diagnostic in the GitHub Actions logs instead of a bare JSONDecodeError.
+    """
+    params = {
+        "srcdb": srcdb,
+        "keyword": keyword,
+        # include whatever params you already had here
+    }
+
+    # A friendly User-Agent can help with some endpoints
+    headers = {
+        "User-Agent": "OSU SUS enrollment snapshot (GitHub Actions)",
+        # add any other headers you were using before
+    }
+
+    print(f"Requesting search data for term {srcdb}, keyword '{keyword}'")
+    resp = requests.get(CLASS_SEARCH_URL, params=params, headers=headers, timeout=30)
+
+    # 1) HTTP-level error handling
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        preview = textwrap.shorten(resp.text.replace("\n", " "), width=500)
+        raise RuntimeError(
+            f"Class search HTTP error for srcdb={srcdb}, keyword='{keyword}'. "
+            f"Status={resp.status_code}, URL={resp.url}, "
+            f"Content-Type={resp.headers.get('Content-Type')!r}. "
+            f"Body preview: {preview}"
+        ) from e
+
+    # 2) JSON parsing error handling
+    try:
+        return resp.json()
+    except json.JSONDecodeError as e:
+        preview = textwrap.shorten(resp.text.replace("\n", " "), width=500)
+        raise RuntimeError(
+            f"Class search did not return valid JSON for srcdb={srcdb}, keyword='{keyword}'. "
+            f"Status={resp.status_code}, URL={resp.url}, "
+            f"Content-Type={resp.headers.get('Content-Type')!r}. "
+            f"Body preview: {preview}"
+        ) from e
 
 
 def build_details_payload(srcdb: str, code: str, crn: str, matched_crns: List[str]) -> Dict[str, Any]:
