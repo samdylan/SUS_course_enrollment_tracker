@@ -1,0 +1,259 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 SPECIFICATIONS FOR CODEX \'97 COREED DAILY TRACKER IMPLEMENTATION\
+==============================================================\
+\
+PROJECT CONTEXT\
+---------------\
+The project root is:\
+    SUS_course_enrollment_tracker/\
+\
+Two NEW working copies already exist (user created):\
+    CoreEd Daily Tracker/osu_enrollment_snapshot_classes_api_v2.py\
+    CoreEd Daily Tracker/osu_enrollment_dashboard_v3.py\
+\
+IMPORTANT:\
+All modifications described in this specification must be applied ONLY to\
+the files inside:\
+    CoreEd Daily Tracker/\
+Do NOT modify the original snapshot or dashboard scripts in the repo root.\
+\
+\
+======================================================================\
+PART A \'97 CREATE A NEW DAILY CORED SNAPSHOT (PER-SECTION TABLE)\
+======================================================================\
+\
+GOAL\
+----\
+Modify osu_enrollment_snapshot_classes_api_v2.py so that it adds a NEW\
+daily snapshot for ALL CoreEd-category sections in the current term.\
+\
+This is SEPARATE from the existing SUS snapshot logic.\
+Do not remove or change the SUS tracking; simply add this new functionality.\
+\
+\
+A1. WHAT THE NEW DAILY SNAPSHOT MUST DO\
+---------------------------------------\
+\
+1. Determine the *current OSU term*, using the SAME term-detection logic\
+   already used by the SUS snapshot script\
+   (the determine_term_for_today() pattern).\
+\
+2. Query ALL sections in the FOUR CoreEd categories used in the CoreEd\
+   capacity scripts (the same four-way grouping).\
+   The script must compute or reuse "coreed_cat4" category labels.\
+\
+3. For each section collected, extract:\
+      term_srcdb\
+      subject\
+      course_number\
+      crn\
+      section\
+      coreed_cat4     (the 4-way category)\
+      campus_simple   (Corvallis, Cascades, Ecampus, etc.)\
+      is_lab          (0/1 based on section number)\
+      enrolled\
+      capacity\
+\
+4. Append ONE ROW PER SECTION PER DAY to a NEW table:\
+      coreed_daily_sections\
+   in the SAME SQLITE DB already used for SUS tracking.\
+\
+\
+A2. DATABASE TABLE STRUCTURE\
+----------------------------\
+\
+In osu_enrollment_snapshot_classes_api_v2.py, ensure the following table\
+exists:\
+\
+CREATE TABLE IF NOT EXISTS coreed_daily_sections (\
+    snapshot_date   TEXT NOT NULL,   -- OSU-local 'YYYY-MM-DD'\
+    term_srcdb      TEXT NOT NULL,   -- e.g., '202602'\
+    subject         TEXT NOT NULL,\
+    course_number   TEXT NOT NULL,\
+    crn             TEXT NOT NULL,\
+    section         TEXT NOT NULL,\
+    coreed_cat4     TEXT NOT NULL,   -- one of the four CoreEd categories\
+    campus_simple   TEXT NOT NULL,   -- 'Corvallis', 'Cascades', 'Ecampus'\
+    is_lab          INTEGER NOT NULL, -- 0 or 1\
+    enrolled        INTEGER NOT NULL,\
+    capacity        INTEGER NOT NULL\
+);\
+\
+All new rows must be appended to this table.\
+\
+\
+A3. TERM AWARENESS\
+------------------\
+Use the same logic already implemented in the SUS snapshot script:\
+- Determine today in OSU timezone (America/Los_Angeles)\
+- Map to term_srcdb (e.g., 202602)\
+\
+snapshot_date = today's OSU-local date, ISO string.\
+\
+\
+A4. BUILD df_coreed\
+-------------------\
+Construct a DataFrame df_coreed containing ALL CoreEd-category sections\
+for the determined term.\
+\
+df_coreed must include:\
+    code OR (subject, course_number)\
+    crn\
+    section\
+    campus OR campus_simple\
+    coreed_cat4 (your 4-way category label)\
+    enrolled\
+    capacity\
+    term_srcdb\
+\
+Then normalize fields:\
+\
+1. Ensure subject and course_number exist.\
+2. Normalize campus_simple using replacement rules:\
+      "Oregon State - Corvallis" -> "Corvallis"\
+      "Oregon State - Cascades" -> "Cascades"\
+      "OSU Ecampus"             -> "Ecampus"\
+3. Add is_lab using:\
+      section numbers 010\'96039 \uc0\u8594  lab/recitation (is_lab = 1)\
+      otherwise is_lab = 0\
+4. Convert enrolled and capacity to integers.\
+5. Remove rows where enrolled or capacity is missing.\
+\
+\
+A5. WRITE THE DAILY SNAPSHOT\
+-----------------------------\
+\
+Construct df_out with EXACT columns in THIS ORDER:\
+\
+snapshot_date\
+term_srcdb\
+subject\
+course_number\
+crn\
+section\
+coreed_cat4\
+campus_simple\
+is_lab\
+enrolled\
+capacity\
+\
+Then append df_out to the DB table coreed_daily_sections.\
+\
+Print a summary:\
+    "Appended X rows to coreed_daily_sections for YYYY-MM-DD (term YYYY)."\
+\
+\
+======================================================================\
+PART B \'97 UPDATE DASHBOARD (osu_enrollment_dashboard_v3.py)\
+======================================================================\
+\
+GOAL:\
+Add a NEW dashboard section that visualizes DAILY CoreEd category trends.\
+\
+This does NOT replace the SUS dashboard section; it is an additional tab.\
+\
+\
+B1. LOAD coreed_daily_sections\
+------------------------------\
+\
+Implement a function:\
+\
+load_coreed_daily_sections()\
+\
+It must:\
+- Read the table coreed_daily_sections into a DataFrame\
+- Parse snapshot_date into datetime\
+- Convert numeric fields (enrolled, capacity, is_lab)\
+- Return the DataFrame\
+\
+\
+B2. NEW VIEW FUNCTION\
+----------------------\
+\
+Add:\
+\
+coreed_category_over_time_view()\
+\
+This function must:\
+\
+1. Load df = load_coreed_daily_sections()\
+\
+2. Add filters:\
+   - Term selector\
+   - Campus multiselect\
+   - CoreEd category multiselect\
+   - Checkbox: \'93Exclude SUS courses\'94 (default False)\
+   - Checkbox: \'93Include lab/recitation sections\'94 (default False)\
+\
+   Logic:\
+      if exclude_sus: df = df[df["subject"] != "SUS"]\
+      if not include_labs: df = df[df["is_lab"] == 0]\
+\
+3. Compute:\
+      df["is_full"] = (enrolled >= capacity)\
+\
+4. Aggregate DAILY:\
+   Grouping keys:\
+      snapshot_date, coreed_cat4, campus_simple\
+\
+   Aggregations:\
+      enrolled_sum      = sum(enrolled)\
+      capacity_sum      = sum(capacity)\
+      num_sections      = nunique(crn)\
+      num_sections_full = sum(is_full)\
+      pct_full          = enrolled_sum / capacity_sum\
+\
+5. For EACH CoreEd category, create a VERTICAL STACK of two charts:\
+   Chart A: Enrollment vs Capacity (two lines)\
+   Chart B: Percent Full over time\
+\
+   Charts must split by campus_simple.\
+\
+\
+B3. INTEGRATE INTO DASHBOARD LAYOUT\
+-----------------------------------\
+\
+Modify main() to create two tabs:\
+\
+tab1, tab2 = st.tabs(["SUS section tracker", "CoreEd category trends"])\
+\
+with tab1:\
+    (existing SUS dashboard content)\
+\
+with tab2:\
+    coreed_category_over_time_view()\
+\
+\
+======================================================================\
+PART C \'97 TESTING INSTRUCTIONS\
+======================================================================\
+\
+1. MANUAL SNAPSHOT:\
+   python "CoreEd Daily Tracker/osu_enrollment_snapshot_classes_api_v2.py"\
+\
+2. INSPECT DB:\
+   sqlite3 osu_enrollment_log_classes.db "\
+   SELECT snapshot_date, term_srcdb, coreed_cat4, campus_simple,\
+          COUNT(*), SUM(enrolled), SUM(capacity)\
+   FROM coreed_daily_sections\
+   GROUP BY snapshot_date, term_srcdb, coreed_cat4, campus_simple\
+   LIMIT 40;\
+   "\
+\
+3. RUN DASHBOARD:\
+   streamlit run "CoreEd Daily Tracker/osu_enrollment_dashboard_v3.py"\
+\
+4. VERIFY:\
+   - Vertical stack of four CoreEd-category charts\
+   - Term, campus, category filters work\
+   - \'93Exclude SUS\'94 toggle works\
+   - \'93Include labs\'94 toggle works\
+\
+\
+END OF SPECIFICATION}

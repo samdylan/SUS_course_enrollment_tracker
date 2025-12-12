@@ -56,8 +56,11 @@ DETAILS_QUERY = {
 TRACK_SUBJECTS = {"SUS"}          # all SUS courses
 TRACK_EXACT_CODES = {"AEC 230X"}  # explicit extra codes
 
-DB_PATH = pathlib.Path("osu_enrollment_log_classes.db")
+# Campus filter – None means "all campuses"
+CAMP_FILTER = None
 
+DB_PATH = pathlib.Path("osu_enrollment_log_classes.db")
+print(f"[api] DB_PATH = {DB_PATH.resolve()}")
 
 # ---------- TERM / DATE LOGIC ----------
 
@@ -168,55 +171,132 @@ def determine_term_for_today(today: Optional[dt.date] = None) -> Dict[str, Any]:
 
 # ---------- API CALLS ----------
 
-def build_search_payload(srcdb: str, keyword: str) -> Dict[str, Any]:
-    """Build the JSON payload for the search POST request."""
+def build_search_payload(srcdb: str, keyword: str, camp: str = CAMP_FILTER) -> Dict[str, Any]:
+    """
+    Build the JSON payload for the search POST request, matching DevTools:
+
+        {
+          "other": {"srcdb": "202602"},
+          "criteria": [
+            {"field": "keyword", "value": "SUS"},
+            {"field": "camp",    "value": "DB,DI,DR"}
+          ]
+        }
+    """
+    criteria = [
+        {
+            "field": "keyword",
+            "value": keyword,
+        }
+    ]
+
+    # Add campus filter if provided
+    if camp:
+        criteria.append(
+            {
+                "field": "camp",
+                "value": camp,
+            }
+        )
+
     return {
         "other": {
-            "srcdb": srcdb
+            "srcdb": srcdb,
         },
-        "criteria": [
-            {
-                "field": "keyword",
-                "value": keyword
-            }
-        ]
+        "criteria": criteria,
     }
 
-
-import json
-import textwrap
-import requests  # you probably already have this imported at the top
-
-CLASS_SEARCH_URL = "..."  # whatever you’re already using
+import textwrap  # keep this near the top or here; either is fine
 
 def fetch_class_search(srcdb: str, keyword: str) -> dict:
     """
     Call the OSU class search API and return parsed JSON.
 
-    Adds robust error handling so that if the endpoint returns HTML,
-    an empty body, or some other non-JSON response, we get a clear
-    diagnostic in the GitHub Actions logs instead of a bare JSONDecodeError.
-    """
-    params = {
-        "srcdb": srcdb,
-        "keyword": keyword,
-        # include whatever params you already had here
-    }
+    Mirrors the browser request seen in DevTools:
 
-    # A friendly User-Agent can help with some endpoints
+      curl 'https://classes.oregonstate.edu/api/?page=fose&route=search&keyword=SUS&camp=DB%2CDI%2CDR' \
+        -X POST \
+        --data-raw '{"other":{"srcdb":"202602"},"criteria":[{"field":"keyword","value":"SUS"},{"field":"camp","value":"DB,DI,DR"}]}'
+
+    We:
+      - send `keyword` and `camp` as query params, AND
+      - include them in the JSON body via build_search_payload.
+    """
+    # JSON payload (body)
+    payload = build_search_payload(srcdb, keyword, camp=CAMP_FILTER)
+
+    # Query string params: page, route, keyword, camp
+    params = {
+    **SEARCH_QUERY,  # {"page": "fose", "route": "search"}
+    }
+    
     headers = {
-        "User-Agent": "OSU SUS enrollment snapshot (GitHub Actions)",
-        # add any other headers you were using before
+        # Match the browser UA from your cURL
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                      "Version/26.1 Safari/605.1.15",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://classes.oregonstate.edu",
+        "Referer": f"https://classes.oregonstate.edu/?keyword={keyword}&srcdb={srcdb}&camp={CAMP_FILTER}",
+
+        # *** IMPORTANT: paste the cookie string from your cURL here ***
+        # Everything after "Cookie: " in your curl, *as one long string*.
+        "Cookie": (
+            "_ga_RHQKNVWJCF=GS2.1.s1765463753$o103$g0$t1765463754$j59$l0$h0; "
+            "_fbp=fb.1.1755495424633.3934555457627417; "
+            "ttcsid=1765427835915::Vd8KuwFkJuyK5cbUQ_HB.92.1765427859929.0; "
+            "ttcsid_BSLGAR0QH7P7CAP6MM20=1765427835914::T3Ly4ErQbauqZv1dibS1.2.1765427859929.1; "
+            "_ga=GA1.1.1946022616.1755495424; "
+            "_scid_r=kHNJm9hlVc1MQDXELS-1jnAIBRuQQQrT6BfCtg; "
+            "_tt_enable_cookie=1; "
+            "_ttp=01K2XTWRBYVGS58AHCQ40Y9D06_.tt.1; "
+            "_ga_FKJ26XQJCS=GS2.1.s1765427820$o21$g1$t1765427821$j59$l0$h0; "
+            "_screload=; "
+            "_gid=GA1.2.167845864.1765425133; "
+            "_ga_24GLZC9ZR6=GS2.1.s1765272398$o23$g0$t1765272406$j52$l0$h0; "
+            "_sctr=1%7C1765123200000; "
+            "_ga_QYPPJQ8GWS=GS2.1.s1764916612$o10$g0$t1764916612$j60$l0$h0; "
+            "_ga_LDRC9SJDTS=GS2.1.s1763531309$o1$g1$t1763532110$j59$l0$h0; "
+            "_gcl_au=1.1.1004346326.1763342953; "
+            "_ga_P4TKPDKRPV=GS2.1.s1763158649$o2$g1$t1763158675$j34$l0$h0; "
+            "_ga_D7QRR38Y63=GS2.1.s1763110259$o1$g0$t1763110259$j60$l0$h0; "
+            "_ga_9RY9MJX4BH=GS2.1.s1760653131$o2$g1$t1760654477$j59$l0$h0; "
+            "_ga_S1XHD0R88P=GS2.2.s1760413574$o1$g0$t1760413574$j60$l0$h0; "
+            "_ga_7F0QY2CKEC=GS2.1.s1759499782$o3$g0$t1759499782$j60$l0$h0; "
+            "_ga_C3GW4PLYQ1=GS2.1.s1758812785$o1$g1$t1758812928$j60$l0$h0; "
+            "_ga_K3VPG0MT96=GS2.1.s1758808084$o2$g0$t1758808084$j60$l0$h0; "
+            "_ga_9EQSEP9D7N=GS2.1.s1758678518$o3$g0$t1758678518$j60$l0$h0; "
+            "_ga_03KTKDRW2Q=GS2.1.s1758678484$o2$g0$t1758678484$j60$l0$h0; "
+            "apt.uid=AP-JB0A21DE9MYX-2-1755504221702-91619822.0.2.3635bc02-2ddf-4575-a526-097013e05729; "
+            "_ga_CMEYDDKYP2=GS2.1.s1758101842$o2$g0$t1758101842$j60$l0$h0; "
+            "_ga_8WH466WTJE=GS2.1.s1757472066$o1$g1$t1757472136$j60$l0$h0; "
+            "__zlcmid=1TZnu7wXEQ62l2c; "
+            "_ga_QC3MB7K855=GS2.1.s1757032019$o1$g0$t1757032019$j60$l0$h0; "
+            "_ga_20HQG504MJ=GS2.1.s1756301931$o1$g0$t1756301931$j60$l0$h0; "
+            "_ga_5VX9TV05LH=GS2.1.s1756181308$o1$g0$t1756181310$j58$l0$h0; "
+            "ttcsid_CCUU293C77U2F908M0U0=1756181309353::tLVRgUeeyFUikSDg-h8P.1.1756181310436; "
+            "__gsas=ID=387d2843ddc1d981:T=1755660004:RT=1755660004:S=ALNI_MYl6wWwRPaFCO4jqkOf5n1NHFBdeg; "
+            "_scid=f_NJm9hlVc1MQDXELS-1jnAIBRuQQQrT"
+        ),
     }
 
     print(f"Requesting search data for term {srcdb}, keyword '{keyword}'")
-    resp = requests.get(CLASS_SEARCH_URL, params=params, headers=headers, timeout=30)
+    resp = requests.post(
+        CLASSES_API_URL,
+        params=params,
+        json=payload,
+        headers=headers,
+        timeout=30,
+    )
 
-    # 1) HTTP-level error handling
+    # HTTP error handling
     try:
         resp.raise_for_status()
     except requests.HTTPError as e:
-        preview = textwrap.shorten(resp.text.replace("\n", " "), width=500)
+        # Show a raw slice so we can see HTML / error text
+        preview = resp.text[:800]
         raise RuntimeError(
             f"Class search HTTP error for srcdb={srcdb}, keyword='{keyword}'. "
             f"Status={resp.status_code}, URL={resp.url}, "
@@ -224,7 +304,7 @@ def fetch_class_search(srcdb: str, keyword: str) -> dict:
             f"Body preview: {preview}"
         ) from e
 
-    # 2) JSON parsing error handling
+    # JSON parsing
     try:
         return resp.json()
     except json.JSONDecodeError as e:
@@ -235,7 +315,6 @@ def fetch_class_search(srcdb: str, keyword: str) -> dict:
             f"Content-Type={resp.headers.get('Content-Type')!r}. "
             f"Body preview: {preview}"
         ) from e
-
 
 def build_details_payload(srcdb: str, code: str, crn: str, matched_crns: List[str]) -> Dict[str, Any]:
     """
@@ -267,17 +346,92 @@ def build_details_payload(srcdb: str, code: str, crn: str, matched_crns: List[st
 def fetch_section_details(srcdb: str, code: str, crn: str, matched_crns: List[str]) -> Dict[str, Any]:
     """
     Call the classes.oregonstate.edu details API for a single section,
-    using the observed payload shape.
+    using the observed payload shape and the same browser-style headers/cookies
+    as the search request.
     """
     payload = build_details_payload(srcdb, code, crn, matched_crns)
+
+    # Reuse the same headers we used for search so the server treats us
+    # like the browser (cookies, UA, X-Requested-With, etc.).
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                      "Version/26.1 Safari/605.1.15",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://classes.oregonstate.edu",
+        "Referer": (
+            f"https://classes.oregonstate.edu/?keyword=SUS&srcdb={srcdb}"
+            f"&camp={CAMP_FILTER}"
+        ),
+        # ⚠️ Same cookie string you already pasted into fetch_class_search
+        "Cookie": (
+            "_ga_RHQKNVWJCF=GS2.1.s1765463753$o103$g0$t1765463754$j59$l0$h0; "
+            "_fbp=fb.1.1755495424633.3934555457627417; "
+            "ttcsid=1765427835915::Vd8KuwFkJuyK5cbUQ_HB.92.1765427859929.0; "
+            "ttcsid_BSLGAR0QH7P7CAP6MM20=1765427835914::T3Ly4ErQbauqZv1dibS1.2.1765427859929.1; "
+            "_ga=GA1.1.1946022616.1755495424; "
+            "_scid_r=kHNJm9hlVc1MQDXELS-1jnAIBRuQQQrT6BfCtg; "
+            "_tt_enable_cookie=1; "
+            "_ttp=01K2XTWRBYVGS58AHCQ40Y9D06_.tt.1; "
+            "_ga_FKJ26XQJCS=GS2.1.s1765427820$o21$g1$t1765427821$j59$l0$h0; "
+            "_screload=; "
+            "_gid=GA1.2.167845864.1765425133; "
+            "_ga_24GLZC9ZR6=GS2.1.s1765272398$o23$g0$t1765272406$j52$l0$h0; "
+            "_sctr=1%7C1765123200000; "
+            "_ga_QYPPJQ8GWS=GS2.1.s1764916612$o10$g0$t1764916612$j60$l0$h0; "
+            "_ga_LDRC9SJDTS=GS2.1.s1763531309$o1$g1$t1763532110$j59$l0$h0; "
+            "_gcl_au=1.1.1004346326.1763342953; "
+            "_ga_P4TKPDKRPV=GS2.1.s1763158649$o2$g1$t1763158675$j34$l0$h0; "
+            "_ga_D7QRR38Y63=GS2.1.s1763110259$o1$g0$t1763110259$j60$l0$h0; "
+            "_ga_9RY9MJX4BH=GS2.1.s1760653131$o2$g1$t1760654477$j59$l0$h0; "
+            "_ga_S1XHD0R88P=GS2.2.s1760413574$o1$g0$t1760413574$j60$l0$h0; "
+            "_ga_7F0QY2CKEC=GS2.1.s1759499782$o3$g0$t1759499782$j60$l0$h0; "
+            "_ga_C3GW4PLYQ1=GS2.1.s1758812785$o1$g1$t1758812928$j60$l0$h0; "
+            "_ga_K3VPG0MT96=GS2.1.s1758808084$o2$g0$t1758808084$j60$l0$h0; "
+            "_ga_9EQSEP9D7N=GS2.1.s1758678518$o3$g0$t1758678518$j60$l0$h0; "
+            "_ga_03KTKDRW2Q=GS2.1.s1758678484$o2$g0$t1758678484$j60$l0$h0; "
+            "apt.uid=AP-JB0A21DE9MYX-2-1755504221702-91619822.0.2.3635bc02-2ddf-4575-a526-097013e05729; "
+            "_ga_CMEYDDKYP2=GS2.1.s1758101842$o2$g0$t1758101842$j60$l0$h0; "
+            "_ga_8WH466WTJE=GS2.1.s1757472066$o1$g1$t1757472136$j60$l0$h0; "
+            "__zlcmid=1TZnu7wXEQ62l2c; "
+            "_ga_QC3MB7K855=GS2.1.s1757032019$o1$g0$t1757032019$j60$l0$h0; "
+            "_ga_20HQG504MJ=GS2.1.s1756301931$o1$g0$t1756301931$j60$l0$h0; "
+            "_ga_5VX9TV05LH=GS2.1.s1756181308$o1$g0$t1756181310$j58$l0$h0; "
+            "ttcsid_CCUU293C77U2F908M0U0=1756181309353::tLVRgUeeyFUikSDg-h8P.1.1756181310436; "
+            "__gsas=ID=387d2843ddc1d981:T=1755660004:RT=1755660004:S=ALNI_MYl6wWwRPaFCO4jqkOf5n1NHFBdeg; "
+            "_scid=f_NJm9hlVc1MQDXELS-1jnAIBRuQQQrT"
+        ),
+    }
+
     resp = requests.post(
         CLASSES_API_URL,
         params=DETAILS_QUERY,
         json=payload,
+        headers=headers,
         timeout=30,
     )
-    resp.raise_for_status()
-    return resp.json()
+
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        # We let enrich_with_details() handle the exception, but give a readable message.
+        raise RuntimeError(
+            f"Details HTTP error for code={code}, crn={crn}, srcdb={srcdb}. "
+            f"Status={resp.status_code}, URL={resp.url}"
+        ) from e
+
+    try:
+        return resp.json()
+    except json.JSONDecodeError as e:
+        # Again, let the caller catch this, but include a useful preview.
+        preview = resp.text[:800]
+        raise RuntimeError(
+            f"Details did not return valid JSON for code={code}, crn={crn}, srcdb={srcdb}. "
+            f"Status={resp.status_code}, Content-Type={resp.headers.get('Content-Type')!r}. "
+            f"Body preview: {preview}"
+        ) from e
 
 
 # ---------- PARSING ----------
@@ -536,10 +690,20 @@ def main() -> None:
         )
         return
 
+    # ----- NEW: do the search call safely -----
     keyword = "SUS"
 
     print(f"Requesting search data for term {srcdb}, keyword '{keyword}'")
-    raw_json = fetch_class_search(srcdb=srcdb, keyword=keyword)
+
+    try:
+        raw_json = fetch_class_search(srcdb=srcdb, keyword=keyword)
+    except Exception as e:
+        print("\nERROR: Search API request failed.")
+        print("Details:", e)
+        print("Aborting snapshot without writing to DB.\n")
+        return
+
+    # Convert the raw JSON to a DataFrame of sections
     df = normalize_results(raw_json, srcdb=srcdb)
 
     print(f"Parsed {len(df)} sections after filtering (before details).")
@@ -547,14 +711,15 @@ def main() -> None:
         print("No sections to enrich; exiting.")
         return
 
+    # ----- Fetch enrollment / capacity details -----
     print("Fetching details (enrollment / max_enroll) per section...")
     df = enrich_with_details(df, srcdb=srcdb)
 
     print("Sample rows after enrichment:")
     print(df[["code", "section", "crn", "enrolled", "capacity"]].head())
 
+    # ----- Append snapshot to DB (append-only) -----
     append_snapshot_to_db(df, DB_PATH)
-
 
 if __name__ == "__main__":
     main()

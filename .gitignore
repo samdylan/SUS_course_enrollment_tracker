@@ -1,5 +1,11 @@
-.venv/
-__pycache__/
-*.log
-*.DS_Store
-# osu_enrollment_log_classes.db
+# Ignore local archive of old / experimental code
+Archived or non-functioning/
+
+# Ignore DB backups
+*.db.backup
+*.db.bak
+*.db.local
+*backup_before_manual_import.db
+
+# Ignore temporary Office lock files
+~$*.docx

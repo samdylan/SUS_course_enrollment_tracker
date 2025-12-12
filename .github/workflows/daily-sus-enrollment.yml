@@ -32,10 +32,6 @@ jobs:
         run: |
           python osu_enrollment_snapshot_classes_api.py
 
-      - name: Run CoreEd daily snapshot script
-        run: |
-          python osu_enrollment_snapshot_classes_api_v2.py
-
       - name: Commit and push updated DB if it changed
         run: |
           # Only bother if the DB actually changed
