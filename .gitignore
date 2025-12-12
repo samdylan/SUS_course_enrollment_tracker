@@ -9,3 +9,16 @@ Archived or non-functioning/
 
 # Ignore temporary Office lock files
 ~$*.docx
+# OS junk
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local diagnostics / scratch scripts
+check_latest_duplicates.py
+db_peek_latest_snapshot.py
+
+# Archives (do not track)
+Archived or non-functioning/
