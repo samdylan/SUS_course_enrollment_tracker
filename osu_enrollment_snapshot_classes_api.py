@@ -584,8 +584,6 @@ def enrich_with_details(df: pd.DataFrame, srcdb: str) -> pd.DataFrame:
         capacity_list.append(safe_int(capacity_val))
         time.sleep(DETAIL_SLEEP_SECONDS)
         
-        import time
-        time.sleep(DETAIL_SLEEP_SECONDS)
 
     df["enrolled"] = enrolled_list
     df["capacity"] = capacity_list
