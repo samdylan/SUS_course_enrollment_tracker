@@ -23,6 +23,9 @@ import pathlib
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple, Iterable
 
+import time
+import random  # optional jitter (see below)
+
 from zoneinfo import ZoneInfo
 
 # OSU local timezone (Corvallis, OR)
@@ -35,9 +38,9 @@ def osu_now() -> dt.datetime:
 def osu_today() -> dt.date:
     """Today's date in OSU local time (PST/PDT)."""
     return osu_now().date()
+
 import pandas as pd
 import requests
-
 
 # ---------- CONFIG ----------
 
@@ -60,6 +63,7 @@ TRACK_EXACT_CODES = {"AEC 230X"}  # explicit extra codes
 CAMP_FILTER = None
 
 DB_PATH = pathlib.Path("osu_enrollment_log_classes.db")
+DETAIL_SLEEP_SECONDS = 0.15  # 150ms between details requests (prevents burst failures)
 print(f"[api] DB_PATH = {DB_PATH.resolve()}")
 
 # ---------- TERM / DATE LOGIC ----------
@@ -250,17 +254,17 @@ def fetch_class_search(srcdb: str, keyword: str) -> Dict[str, Any]:
 
         # ---- Retry conditions ----
         if (
-            resp.status_code == 202
+            resp.status_code in (202, 429)
+            or 500 <= resp.status_code <= 599
             or not resp.text.strip()
             or "text/html" in content_type
         ):
-            wait = min(2 ** attempt, 20)
+            wait = min(2 ** attempt, 20) + random.uniform(0, 0.25)  # remove jitter if you prefer
             print(
                 f"[search] retry {attempt}/{max_tries} "
                 f"(status={resp.status_code}, ct={content_type!r}) "
-                f"for srcdb={srcdb}, keyword={keyword!r}; waiting {wait}s"
+                f"for srcdb={srcdb}, keyword={keyword!r}; waiting {wait:.2f}s"
             )
-            import time
             time.sleep(wait)
             continue
 
@@ -306,6 +310,7 @@ def build_details_payload(srcdb: str, code: str, crn: str, matched_crns: List[st
           "matched": "crn:37716,36727,37717,..."
         }
     """
+    
     # ensure all CRNs are strings and non-empty
     crn_list = [str(c).strip() for c in matched_crns if str(c).strip()]
     if not crn_list:
@@ -367,17 +372,17 @@ def fetch_section_details(
 
         # ---- Retry conditions ----
         if (
-            resp.status_code == 202
+            resp.status_code in (202, 429)
+            or 500 <= resp.status_code <= 599
             or not resp.text.strip()
             or "text/html" in content_type
         ):
-            wait = min(2 ** attempt, 20)
+            wait = min(2 ** attempt, 20) + random.uniform(0, 0.25)  # remove jitter if you prefer
             print(
                 f"[details] retry {attempt}/{max_tries} "
                 f"(status={resp.status_code}, ct={content_type!r}) "
-                f"for code={code}, crn={crn}; waiting {wait}s"
+                f"for code={code}, crn={crn}; waiting {wait:.2f}s"
             )
-            import time
             time.sleep(wait)
             continue
 
@@ -552,6 +557,7 @@ def enrich_with_details(df: pd.DataFrame, srcdb: str) -> pd.DataFrame:
             print(f"Warning: details fetch failed for code={code!r}, crn={crn!r}: {e}")
             enrolled_list.append(None)
             capacity_list.append(None)
+            time.sleep(DETAIL_SLEEP_SECONDS)
             continue
 
         # Debug print for first few rows
@@ -576,6 +582,10 @@ def enrich_with_details(df: pd.DataFrame, srcdb: str) -> pd.DataFrame:
 
         enrolled_list.append(safe_int(enrolled_val))
         capacity_list.append(safe_int(capacity_val))
+        time.sleep(DETAIL_SLEEP_SECONDS)
+        
+        import time
+        time.sleep(DETAIL_SLEEP_SECONDS)
 
     df["enrolled"] = enrolled_list
     df["capacity"] = capacity_list
