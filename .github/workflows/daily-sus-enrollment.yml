@@ -30,7 +30,7 @@ jobs:
 
       - name: Run enrollment snapshot script
         run: |
-          python osu_enrollment_snapshot_classes_api.py
+          python osu_enrollment_snapshot_classes_api_coreed.py
 
       - name: Commit and push updated DB if it changed
         run: |
