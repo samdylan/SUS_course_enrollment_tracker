@@ -17,6 +17,8 @@ Run:
 Optional:
   python3 osu_enrollment_snapshot_classes_api_coreed.py 202602
     (force srcdb; e.g., 202600/202601/202602/202603)
+  python3 osu_enrollment_snapshot_classes_api_coreed.py 202601 --coreed-backfill
+    (Writes CoreEd snapshot into table: coreed_capacity_backfill (for QA/compare; dashboards unaffected))
 """
 
 import datetime as dt
@@ -610,6 +612,89 @@ def append_coreed_to_db(df: pd.DataFrame, db_path: pathlib.Path) -> None:
         df.to_sql("coreed_daily_sections", conn, if_exists="append", index=False)
 
     print(f"Appended {len(df)} CoreEd rows to {db_path} (table coreed_daily_sections).")
+
+# --------------------
+# Backfill: CoreEd results to alternate table for QA/compare
+# --------------------
+def append_coreed_backfill_to_db(df: pd.DataFrame, db_path: pathlib.Path) -> None:
+    """Write a CoreEd snapshot into a separate table for QA/compare (does NOT touch coreed_capacity).
+
+    Intended for backfilling a past term (e.g., 202601) while the API still serves that srcdb.
+    """
+    if df.empty:
+        print("No CoreEd rows to backfill.")
+        return
+
+    now = osu_now()
+    df = df.copy()
+
+    # Standard snapshot stamps
+    df["snapshot_date"] = now.date().isoformat()
+    df["snapshot_timestamp"] = now.isoformat(timespec="seconds")
+
+    # Canonical subset resembling coreed_capacity (plus snapshot stamps)
+    col_order = [
+        "snapshot_date",
+        "snapshot_timestamp",
+        "term_srcdb",
+        "coreed_attr",
+        "coreed_cat4",
+        "subject",
+        "course_number",
+        "code",
+        "crn",
+        "section",
+        "title",
+        "campus_code",
+        "campus_simple",
+        "enrolled",
+        "capacity",
+    ]
+    for c in col_order:
+        if c not in df.columns:
+            df[c] = None
+    df = df[col_order]
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS coreed_capacity_backfill (
+                snapshot_date      TEXT,
+                snapshot_timestamp TEXT,
+                term_srcdb         TEXT,
+                coreed_attr        TEXT,
+                coreed_cat4        TEXT,
+                subject            TEXT,
+                course_number      TEXT,
+                code               TEXT,
+                crn                TEXT,
+                section            TEXT,
+                title              TEXT,
+                campus_code        TEXT,
+                campus_simple      TEXT,
+                enrolled           INTEGER,
+                capacity           INTEGER
+            )
+            """
+        )
+
+        # Idempotency: replace same-day backfill for the same term
+        term_vals = (
+            df[["snapshot_date", "term_srcdb"]]
+            .dropna()
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+        for snap_date, term in term_vals:
+            conn.execute(
+                "DELETE FROM coreed_capacity_backfill WHERE snapshot_date = ? AND term_srcdb = ?;",
+                (str(snap_date), str(term)),
+            )
+        conn.commit()
+
+        df.to_sql("coreed_capacity_backfill", conn, if_exists="append", index=False)
+
+    print(f"Backfilled {len(df)} CoreEd rows to {db_path} (table coreed_capacity_backfill).")
 # --------------------
 # MAIN
 # --------------------
@@ -617,12 +702,23 @@ def main() -> None:
     today = osu_today()
     term_info = determine_term_for_today(today)
 
-    # Allow manual override srcdb via CLI
-    if len(sys.argv) > 1:
-        srcdb = str(sys.argv[1]).strip()
+    # Allow manual override srcdb via CLI, plus optional backfill mode
+    argv = [a.strip() for a in sys.argv[1:] if str(a).strip()]
+    backfill_coreed = "--coreed-backfill" in argv
+
+    forced_srcdb = None
+    if argv:
+        first = argv[0]
+        if len(first) == 6 and first.isdigit():
+            forced_srcdb = first
+
+    if forced_srcdb:
+        srcdb = forced_srcdb
         within_window = True  # if you force it, we run it
         term_label = f"(forced srcdb={srcdb})"
         print(f"[{today.isoformat()}] Forced srcdb from CLI: {srcdb}")
+        if backfill_coreed:
+            print("[mode] --coreed-backfill enabled: will also write coreed_capacity_backfill (QA/compare).")
     else:
         srcdb = term_info["srcdb"]
         term_label = term_info["term_label"]
@@ -664,6 +760,8 @@ def main() -> None:
         df_coreed = pd.concat(coreed_frames, ignore_index=True) if coreed_frames else pd.DataFrame()
         if not df_coreed.empty:
             append_coreed_to_db(df_coreed, DB_PATH)
+            if backfill_coreed:
+                append_coreed_backfill_to_db(df_coreed, DB_PATH)
         else:
             print("CoreEd: no rows fetched; nothing to append.")
 

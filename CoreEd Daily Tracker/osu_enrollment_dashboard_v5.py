@@ -244,13 +244,13 @@ def load_sus_historic_daily() -> pd.DataFrame:
         }
     ).fillna("C")
 
-    # Lab flag: use the same rule as live SUS data (010–019 are labs/recitations).
+    # Lab flag: use the same rule as live SUS data (010–030 are labs/recitations).
     def is_lab(section: str) -> bool:
         s = str(section).strip()
         if len(s) != 3 or not s.isdigit():
             return False
         n = int(s)
-        return 10 <= n < 20
+        return 10 <= n < 30
 
     df["is_lab"] = df["section"].apply(is_lab)
 
