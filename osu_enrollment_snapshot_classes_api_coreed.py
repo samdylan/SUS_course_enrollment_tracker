@@ -19,6 +19,12 @@ Optional:
     (force srcdb; e.g., 202600/202601/202602/202603)
   python3 osu_enrollment_snapshot_classes_api_coreed.py 202601 --coreed-backfill
     (Writes CoreEd snapshot into table: coreed_capacity_backfill (for QA/compare; dashboards unaffected))
+  python3 osu_enrollment_snapshot_classes_api_coreed.py --coreed-capacity-refresh
+    (Forces a look-ahead term refresh into coreed_capacity; runs even outside window)
+
+Notes:
+  - On the 1st and 15th (OSU local date), the script refreshes CoreEd capacity for the look-ahead term
+    (current term srcdb + 1) into `coreed_capacity`.
 """
 
 import datetime as dt
@@ -61,6 +67,9 @@ TRACK_EXACT_CODES = {"AEC 230X"}  # explicit extra codes (optional)
 
 # CoreEd tracking
 COREED_ATTRS = ["CFSI", "CSSS", "CSDP", "CFSS"]
+
+# CoreEd capacity refresh schedule (OSU local date)
+COREED_CAPACITY_REFRESH_DAYS = {1, 15}
 
 # --------------------
 # TERM LOGIC (same as your SUS script)
@@ -148,6 +157,12 @@ def next_srcdb(srcdb: str, steps: int = 1) -> str:
             idx = 0
             year += 1
     return f"{year}{seq[idx]}"
+
+# Helper: go backwards N terms
+def prev_srcdb(srcdb: str, steps: int = 1) -> str:
+    """Go back an OSU term srcdb by `steps` (inverse of next_srcdb)."""
+    # To go back N, go forward (4 - (N % 4)) % 4 times (modulo 4 terms/yr)
+    return next_srcdb(srcdb, steps=(4 - (int(steps) % 4)) % 4)
 
 # --------------------
 # HTTP HELPERS (robust, browser-like)
@@ -695,6 +710,132 @@ def append_coreed_backfill_to_db(df: pd.DataFrame, db_path: pathlib.Path) -> Non
         df.to_sql("coreed_capacity_backfill", conn, if_exists="append", index=False)
 
     print(f"Backfilled {len(df)} CoreEd rows to {db_path} (table coreed_capacity_backfill).")
+
+
+# --------------------
+# CoreEd capacity refresh: write to coreed_capacity table (scheduled/forced)
+# --------------------
+def refresh_coreed_capacity_to_db(df: pd.DataFrame, db_path: pathlib.Path) -> None:
+    """Refresh CoreEd capacity snapshot into `coreed_capacity`.
+
+    Intended use:
+      - twice-monthly (1st/15th) refresh for the look-ahead term (current+1)
+      - may be run even when outside the daily snapshot window
+
+    Behavior:
+      - writes a point-in-time snapshot with snapshot_date + snapshot_timestamp
+      - idempotent for (snapshot_date, term_srcdb): re-runs replace that day's snapshot
+    """
+    if df.empty:
+        print("No CoreEd rows to write to coreed_capacity.")
+        return
+
+    now = osu_now()
+    df = df.copy()
+
+    df["snapshot_date"] = now.date().isoformat()
+    df["snapshot_timestamp"] = now.isoformat(timespec="seconds")
+
+    # Canonical columns (superset; safe to add missing cols to DB)
+    col_order = [
+        "snapshot_date",
+        "snapshot_timestamp",
+        "term_srcdb",
+        "coreed_attr",
+        "coreed_cat4",
+        "subject",
+        "course_number",
+        "code",
+        "crn",
+        "section",
+        "title",
+        "campus_code",
+        "campus_simple",
+        "enrolled",
+        "capacity",
+    ]
+
+    for c in col_order:
+        if c not in df.columns:
+            df[c] = None
+    df = df[col_order]
+
+    def ensure_table_and_columns(conn: sqlite3.Connection) -> None:
+        # Create minimal base table if missing
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS coreed_capacity (
+                snapshot_timestamp TEXT,
+                term_srcdb         TEXT,
+                coreed_attr        TEXT,
+                code               TEXT,
+                section            TEXT,
+                enrolled           INTEGER,
+                capacity           INTEGER,
+                campus_code        TEXT
+            )
+            """
+        )
+
+        existing = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(coreed_capacity);").fetchall()
+        }
+
+        needed: Dict[str, str] = {
+            "snapshot_date": "TEXT",
+            "snapshot_timestamp": "TEXT",
+            "term_srcdb": "TEXT",
+            "coreed_attr": "TEXT",
+            "coreed_cat4": "TEXT",
+            "subject": "TEXT",
+            "course_number": "TEXT",
+            "code": "TEXT",
+            "crn": "TEXT",
+            "section": "TEXT",
+            "title": "TEXT",
+            "campus_code": "TEXT",
+            "campus_simple": "TEXT",
+            "enrolled": "INTEGER",
+            "capacity": "INTEGER",
+        }
+
+        for col, ctype in needed.items():
+            if col in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE coreed_capacity ADD COLUMN {col} {ctype};")
+                existing.add(col)
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" in str(e).lower():
+                    continue
+                raise
+
+        conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        ensure_table_and_columns(conn)
+
+        # Idempotency: replace same-day snapshot for each term in the df
+        term_vals = (
+            df[["snapshot_date", "term_srcdb"]]
+            .dropna()
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+        for snap_date, term in term_vals:
+            conn.execute(
+                "DELETE FROM coreed_capacity WHERE snapshot_date = ? AND term_srcdb = ?;",
+                (str(snap_date), str(term)),
+            )
+        conn.commit()
+
+        df.to_sql("coreed_capacity", conn, if_exists="append", index=False)
+
+    print(
+        f"Refreshed {len(df)} CoreEd rows to {db_path} (table coreed_capacity) "
+        f"for term(s): {sorted(df['term_srcdb'].dropna().unique().tolist())}"
+    )
 # --------------------
 # MAIN
 # --------------------
@@ -702,9 +843,13 @@ def main() -> None:
     today = osu_today()
     term_info = determine_term_for_today(today)
 
-    # Allow manual override srcdb via CLI, plus optional backfill mode
+    # First day of a new enrollment window (used to refresh the *previous* term CoreEd capacity once)
+    is_first_day_of_window = today == term_info["window_start"]
+
+    # Allow manual override srcdb via CLI, plus optional backfill mode and capacity refresh
     argv = [a.strip() for a in sys.argv[1:] if str(a).strip()]
     backfill_coreed = "--coreed-backfill" in argv
+    force_capacity_refresh = "--coreed-capacity-refresh" in argv
 
     forced_srcdb = None
     if argv:
@@ -729,41 +874,113 @@ def main() -> None:
             f"(classes begin {term_info['classes_begin']})"
         )
 
-    if not within_window:
-        print("Today is outside snapshot window; skipping fetch and DB write.")
+    # Daily snapshots are limited to the enrollment window, but capacity refresh may still run.
+    should_run_daily = within_window
+    should_run_capacity_refresh = force_capacity_refresh or (today.day in COREED_CAPACITY_REFRESH_DAYS)
+
+    # On the *first day* of the new window, do a one-time refresh of the PRIOR term into coreed_capacity.
+    # This supports the CoreEd dashboard's historical look-back without needing frequent refreshes.
+    should_run_prev_term_coreed_refresh = bool(within_window and is_first_day_of_window and not forced_srcdb)
+
+    if not should_run_daily and not should_run_capacity_refresh and not should_run_prev_term_coreed_refresh:
+        print("Today is outside snapshot window and not a scheduled capacity refresh day; skipping fetch and DB write.")
         return
 
     print(f"[api] DB_PATH = {DB_PATH.resolve()}")
 
     with requests.Session() as session:
-        # ---- SUS ----
-        print("\n=== SUS snapshot ===")
-        raw_sus = fetch_search_keyword(session, srcdb, keyword="SUS")
-        df_sus = normalize_sus_results(raw_sus, srcdb=srcdb)
-        print(f"SUS: {len(df_sus)} sections after filtering (pre-details)")
-        if not df_sus.empty:
-            df_sus = enrich_with_details(df_sus, srcdb=srcdb, session=session)
-            append_sus_to_db(df_sus, DB_PATH)
+        # -----------------
+        # One-time prior-term refresh (CoreEd dashboard support)
+        # Runs only on the first day of the new window.
+        # -----------------
+        if should_run_prev_term_coreed_refresh:
+            prev_term_srcdb = prev_srcdb(srcdb, 1)
+            print(
+                "\n=== CoreEd prior-term refresh (one-time; first day of window) ===\n"
+                f"New-window term srcdb={srcdb} → prior-term srcdb={prev_term_srcdb}"
+            )
 
-        # ---- CoreEd ----
-        print("\n=== CoreEd snapshot ===")
-        coreed_frames: List[pd.DataFrame] = []
-        for attr in COREED_ATTRS:
-            print(f"CoreEd {attr}: search…")
-            raw = fetch_search_coreed_attr(session, srcdb, attr)
-            df_attr = normalize_coreed_results(raw, srcdb=srcdb, coreed_attr=attr)
-            print(f"  {attr}: {len(df_attr)} sections (pre-details)")
-            if not df_attr.empty:
-                df_attr = enrich_with_details(df_attr, srcdb=srcdb, session=session)
-                coreed_frames.append(df_attr)
+            prev_frames: List[pd.DataFrame] = []
+            for attr in COREED_ATTRS:
+                print(f"CoreEd {attr}: search…")
+                raw = fetch_search_coreed_attr(session, prev_term_srcdb, attr)
+                df_attr = normalize_coreed_results(raw, srcdb=prev_term_srcdb, coreed_attr=attr)
+                print(f"  {attr}: {len(df_attr)} sections (pre-details)")
+                if not df_attr.empty:
+                    df_attr = enrich_with_details(df_attr, srcdb=prev_term_srcdb, session=session)
+                    prev_frames.append(df_attr)
 
-        df_coreed = pd.concat(coreed_frames, ignore_index=True) if coreed_frames else pd.DataFrame()
-        if not df_coreed.empty:
-            append_coreed_to_db(df_coreed, DB_PATH)
-            if backfill_coreed:
-                append_coreed_backfill_to_db(df_coreed, DB_PATH)
+            df_prev = pd.concat(prev_frames, ignore_index=True) if prev_frames else pd.DataFrame()
+            if not df_prev.empty:
+                refresh_coreed_capacity_to_db(df_prev, DB_PATH)
+            else:
+                print("CoreEd prior-term refresh: no rows fetched; nothing to write.")
         else:
-            print("CoreEd: no rows fetched; nothing to append.")
+            print("\n[prior-term] Not first day of window (or forced srcdb); skipping prior-term CoreEd refresh.")
+
+        # -----------------
+        # Daily snapshots (current term) — only within window
+        # -----------------
+        if should_run_daily:
+            # ---- SUS ----
+            print("\n=== SUS snapshot ===")
+            raw_sus = fetch_search_keyword(session, srcdb, keyword="SUS")
+            df_sus = normalize_sus_results(raw_sus, srcdb=srcdb)
+            print(f"SUS: {len(df_sus)} sections after filtering (pre-details)")
+            if not df_sus.empty:
+                df_sus = enrich_with_details(df_sus, srcdb=srcdb, session=session)
+                append_sus_to_db(df_sus, DB_PATH)
+
+            # ---- CoreEd daily ----
+            print("\n=== CoreEd snapshot (daily; current term) ===")
+            coreed_frames: List[pd.DataFrame] = []
+            for attr in COREED_ATTRS:
+                print(f"CoreEd {attr}: search…")
+                raw = fetch_search_coreed_attr(session, srcdb, attr)
+                df_attr = normalize_coreed_results(raw, srcdb=srcdb, coreed_attr=attr)
+                print(f"  {attr}: {len(df_attr)} sections (pre-details)")
+                if not df_attr.empty:
+                    df_attr = enrich_with_details(df_attr, srcdb=srcdb, session=session)
+                    coreed_frames.append(df_attr)
+
+            df_coreed = pd.concat(coreed_frames, ignore_index=True) if coreed_frames else pd.DataFrame()
+            if not df_coreed.empty:
+                append_coreed_to_db(df_coreed, DB_PATH)
+                if backfill_coreed:
+                    append_coreed_backfill_to_db(df_coreed, DB_PATH)
+            else:
+                print("CoreEd (daily): no rows fetched; nothing to append.")
+        else:
+            print("\n[daily] Outside window: skipping daily SUS/CoreEd snapshots.")
+
+        # -----------------
+        # Capacity refresh (look-ahead term) — runs on 1st/15th (OSU date) or forced
+        # -----------------
+        if should_run_capacity_refresh:
+            base_srcdb = srcdb
+            lookahead_srcdb = next_srcdb(base_srcdb, 1)
+            print(
+                "\n=== CoreEd capacity refresh (scheduled/forced; look-ahead term) ===\n"
+                f"Base term srcdb={base_srcdb} → look-ahead srcdb={lookahead_srcdb}"
+            )
+
+            cap_frames: List[pd.DataFrame] = []
+            for attr in COREED_ATTRS:
+                print(f"CoreEd {attr}: search…")
+                raw = fetch_search_coreed_attr(session, lookahead_srcdb, attr)
+                df_attr = normalize_coreed_results(raw, srcdb=lookahead_srcdb, coreed_attr=attr)
+                print(f"  {attr}: {len(df_attr)} sections (pre-details)")
+                if not df_attr.empty:
+                    df_attr = enrich_with_details(df_attr, srcdb=lookahead_srcdb, session=session)
+                    cap_frames.append(df_attr)
+
+            df_cap = pd.concat(cap_frames, ignore_index=True) if cap_frames else pd.DataFrame()
+            if not df_cap.empty:
+                refresh_coreed_capacity_to_db(df_cap, DB_PATH)
+            else:
+                print("CoreEd capacity refresh: no rows fetched; nothing to write.")
+        else:
+            print("\n[capacity] Not a scheduled capacity refresh day; skipping look-ahead refresh.")
 
     print("\nDone.")
 
