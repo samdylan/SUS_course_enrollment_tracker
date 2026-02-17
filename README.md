@@ -5,6 +5,8 @@ Automated enrollment and capacity snapshots for OSU Sustainability (SUS) courses
 **Version:** Clean Build 1.0
 **Last Updated:** February 17, 2026
 
+For detailed setup, running instructions, and troubleshooting, see **[docs/TECHNICAL_GUIDE.md](docs/TECHNICAL_GUIDE.md)**.
+
 ---
 
 ## Quick Start
@@ -51,6 +53,7 @@ SUS_course_enrollment_tracker/
 │   └── daily-sus-enrollment.yml        # GitHub Actions: daily at 17:00 UTC
 │
 ├── docs/
+│   ├── TECHNICAL_GUIDE.md              # Setup, running, troubleshooting
 │   └── reference/                      # User manuals, specs, screengrabs
 │
 ├── dev/                                # DEVELOPMENT AREA
