@@ -6,6 +6,7 @@ Keeps the SUS views from v2 and appends CoreEd timeseries (capacity/enrollment)
 from the coreed_daily_sections table.
 """
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -14,13 +15,11 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from pathlib import Path
-
-# This resolves the DB path to the *parent* directory of this script
-from pathlib import Path
-
-DB_PATH = Path(__file__).resolve().parents[1] / "osu_enrollment_log_classes.db"
-st.sidebar.caption(f"Using DB: {DB_PATH.resolve()}")
+# Allow override (useful for Streamlit Cloud / servers / different repo layouts)
+# Example: export ENROLLMENT_DB_PATH="/path/to/osu_enrollment_log_classes.db"
+DB_PATH = Path(os.environ.get("ENROLLMENT_DB_PATH", "")).expanduser() if os.environ.get("ENROLLMENT_DB_PATH") else (
+    Path(__file__).resolve().parent.parent / "data" / "osu_enrollment_log_classes.db"
+)
 COREED_DAILY_TABLE = "coreed_daily_sections"
 
 CAMPUS_ORDER = ["Corvallis", "Ecampus", "Cascades", "Other"]
@@ -375,14 +374,13 @@ def category_timeseries_chart(
         df_cat.groupby(
             ["snapshot_date", "days_from_start", "campus_simple"],
             as_index=False,
+            observed=True,
         )[["enrolled", "capacity"]].sum(min_count=1)
     )
 
-    # Drop days where either enrolled or capacity is zero for a category/campus.
-    # Conceptually, totals across all sections in a CoreEd category should not be zero;
-    # such rows almost certainly indicate upstream data issues, and including them
-    # causes the trend lines to zig-zag through the axis.
-    agg = agg[(agg["enrolled"] > 0) & (agg["capacity"] > 0)]
+    # Drop rows where capacity is zero (likely upstream data issues).
+    # Allow enrolled == 0 so that pre-enrollment terms still display capacity lines.
+    agg = agg[agg["capacity"] > 0]
 
     melted = agg.melt(
         id_vars=["snapshot_date", "days_from_start", "campus_simple"],
@@ -522,11 +520,17 @@ def main():
     raw_terms = df_filters["term_srcdb"].dropna().astype(str).unique().tolist()
     term_values = sorted(raw_terms, key=int, reverse=True)
 
-    # Default "current" term = the highest term code that has data
+    # Default to the most recent term that has non-zero enrollment.
+    # This avoids defaulting to a future term where registration hasn't started yet.
+    default_terms = []
     if term_values:
-        default_terms = [term_values[0]]
-    else:
-        default_terms = []
+        for t in term_values:  # already sorted newest-first
+            term_df = df_filters[df_filters["term_srcdb"].astype(str) == t]
+            if (pd.to_numeric(term_df["enrolled"], errors="coerce") > 0).any():
+                default_terms = [t]
+                break
+        if not default_terms:
+            default_terms = [term_values[0]]
 
     term_choice = st.sidebar.multiselect(
         "Terms (srcdb)",
@@ -795,7 +799,7 @@ def main():
                 latest = latest.rename(
                     columns={"series_label": "Campus", "enrolled": "Enrolled"}
                 )
-            st.dataframe(latest, use_container_width=True)
+            st.dataframe(latest, width="stretch")
 
     # ---- CoreEd daily section ----
     st.markdown("---")
@@ -823,10 +827,17 @@ def main():
     coreed_terms = sorted(
         df_coreed["term_srcdb"].dropna().unique().tolist(), reverse=True
     )
+    # Default to the most recent term with non-zero enrollment
+    coreed_default_idx = 0
+    for i, t in enumerate(coreed_terms):
+        term_enr = df_coreed.loc[df_coreed["term_srcdb"] == t, "enrolled"]
+        if (term_enr > 0).any():
+            coreed_default_idx = i
+            break
     coreed_term_choice = st.sidebar.selectbox(
         "CoreEd term (srcdb)",
         coreed_terms,
-        index=0 if coreed_terms else None,
+        index=coreed_default_idx if coreed_terms else None,
     )
     include_labs_coreed = st.sidebar.checkbox(
         "CoreEd: Include lab/recitation sections", value=False
@@ -968,7 +979,7 @@ def main():
                         "is_full",
                     ]
                 ].sort_values(["coreed_cat4", "campus_simple", "crn"]),
-                use_container_width=True,
+                width="stretch",
             )
 
         # Optional debug: focus just on Seeking Solutions (CSSS)
@@ -987,7 +998,7 @@ def main():
                 .sort_values(["campus_simple", "crn"])
             )
             st.subheader("Seeking Solutions (CSSS) sections – latest snapshot")
-            st.dataframe(csss_detail, use_container_width=True)
+            st.dataframe(csss_detail, width="stretch")
 
         def color_row(row):
             val = row.get("percent_full")
@@ -1012,7 +1023,7 @@ def main():
             styled.set_properties(
                 subset=["coreed_label"], **{"font-weight": "bold"}
             ),
-            use_container_width=True,
+            width="stretch",
         )
 
 

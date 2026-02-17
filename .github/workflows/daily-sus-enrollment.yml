@@ -30,18 +30,18 @@ jobs:
 
       - name: Run enrollment snapshot script
         run: |
-          python osu_enrollment_snapshot_classes_api_coreed.py
+          python scripts/osu_enrollment_snapshot_classes_api_coreed.py
 
       - name: Commit and push updated DB if it changed
         run: |
           # Only bother if the DB actually changed
-          if git status --porcelain osu_enrollment_log_classes.db | grep -q .; then
+          if git status --porcelain data/osu_enrollment_log_classes.db | grep -q .; then
             echo "Database changed; committing update."
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add osu_enrollment_log_classes.db
+            git add data/osu_enrollment_log_classes.db
             git commit -m "Daily enrollment snapshot $(date -u +'%Y-%m-%d')"
             git push
           else
-            echo "No changes to osu_enrollment_log_classes.db; nothing to commit."
+            echo "No changes to data/osu_enrollment_log_classes.db; nothing to commit."
           fi

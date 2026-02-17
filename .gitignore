@@ -1,14 +1,10 @@
-# Ignore local archive of old / experimental code
-Archived or non-functioning/
+# Archive and dev directories (not tracked in git)
+archive/
+dev/
 
-# Ignore DB backups
-*.db.backup
-*.db.bak
-*.db.local
-*backup_before_manual_import.db
+# Virtual environment
+.venv/
 
-# Ignore temporary Office lock files
-~$*.docx
 # OS junk
 .DS_Store
 
@@ -16,9 +12,13 @@ Archived or non-functioning/
 __pycache__/
 *.pyc
 
-# Local diagnostics / scratch scripts
-check_latest_duplicates.py
-db_peek_latest_snapshot.py
+# Temporary Office lock files
+~$*
 
-# Archives (do not track)
-Archived or non-functioning/
+# DB backups (the production DB in data/ IS tracked)
+*.db.backup
+*.db.bak
+*.db.local
+
+# IDE
+.vscode/

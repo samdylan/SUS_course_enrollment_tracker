@@ -12,14 +12,14 @@ Design goals:
 
 Run:
   source .venv/bin/activate
-  python3 osu_enrollment_snapshot_classes_api_coreed.py
+  python scripts/osu_enrollment_snapshot_classes_api_coreed.py
 
 Optional:
-  python3 osu_enrollment_snapshot_classes_api_coreed.py 202602
+  python scripts/osu_enrollment_snapshot_classes_api_coreed.py 202602
     (force srcdb; e.g., 202600/202601/202602/202603)
-  python3 osu_enrollment_snapshot_classes_api_coreed.py 202601 --coreed-backfill
+  python scripts/osu_enrollment_snapshot_classes_api_coreed.py 202601 --coreed-backfill
     (Writes CoreEd snapshot into table: coreed_capacity_backfill (for QA/compare; dashboards unaffected))
-  python3 osu_enrollment_snapshot_classes_api_coreed.py --coreed-capacity-refresh
+  python scripts/osu_enrollment_snapshot_classes_api_coreed.py --coreed-capacity-refresh
     (Forces a look-ahead term refresh into coreed_capacity; runs even outside window)
 
 Notes:
@@ -29,6 +29,7 @@ Notes:
 
 import datetime as dt
 import json
+import os
 import pathlib
 import random
 import sqlite3
@@ -58,7 +59,13 @@ CLASSES_API_URL = "https://classes.oregonstate.edu/api/"
 SEARCH_QUERY = {"page": "fose", "route": "search"}
 DETAILS_QUERY = {"page": "fose", "route": "details"}
 
-DB_PATH = pathlib.Path("osu_enrollment_log_classes.db")  # relative to CWD
+# Resolve DB path relative to the repo root (parent of scripts/).
+# Allow override via env var for CI or alternative layouts.
+DB_PATH = (
+    pathlib.Path(os.environ["ENROLLMENT_DB_PATH"]).expanduser()
+    if os.environ.get("ENROLLMENT_DB_PATH")
+    else pathlib.Path(__file__).resolve().parent.parent / "data" / "osu_enrollment_log_classes.db"
+)
 DETAIL_SLEEP_SECONDS = 0.15
 
 # SUS tracking
