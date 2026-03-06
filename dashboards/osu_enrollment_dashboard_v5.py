@@ -23,6 +23,11 @@ DB_PATH = Path(os.environ.get("ENROLLMENT_DB_PATH", "")).expanduser() if os.envi
 COREED_DAILY_TABLE = "coreed_daily_sections"
 
 CAMPUS_ORDER = ["Corvallis", "Ecampus", "Cascades", "Other"]
+CAS_SUBJECT_CODES = {
+    "AED", "AEC", "AG", "AGRI", "ANS", "BDS", "BOT", "BRR",
+    "CROP", "CSS", "ENT", "FST", "FW", "HORT", "LEAD", "PBG",
+    "RNG", "SOIL", "SUS", "TOX",
+}
 COREED_LABELS = {
     "CFSI": "Scientific Inquiry & Analysis",
     "CSSS": "Seeking Solutions",
@@ -96,10 +101,11 @@ def load_sus_data() -> pd.DataFrame:
         if len(s) != 3 or not s.isdigit():
             return False
         n = int(s)
-        return 10 <= n < 20
+        return 10 <= n < 30
 
     df["is_lab"] = df["section"].apply(is_lab)
     df["enrolled"] = pd.to_numeric(df["enrolled"], errors="coerce")
+    df["capacity"] = pd.to_numeric(df.get("capacity"), errors="coerce")
     return df
 
 
@@ -259,35 +265,7 @@ def load_sus_historic_daily() -> pd.DataFrame:
     # Mark as historic
     df["is_historic"] = True
 
-    # ---------- Loader-level debug ----------
-    with st.expander("Debug: historic SUS loader (section_num & campus)"):
-        # Show a small sample including section_num and campus_simple
-        st.write(
-            df[
-                [
-                    "term_srcdb",
-                    "course_number",
-                    "section",
-                    "section_num",
-                    "campus_simple",
-                    "enrolled",
-                ]
-            ]
-            .sort_values(["term_srcdb", "course_number", "section"])
-            .head(40)
-        )
-
-        dbg = (
-            df.groupby(["term_srcdb", "campus_simple"], as_index=False)
-            .size()
-            .pivot(index="term_srcdb", columns="campus_simple", values="size")
-            .fillna(0)
-            .astype(int)
-        )
-        st.write("Row counts by term & campus (from loader):")
-        st.dataframe(dbg)
-
-    # Keep only columns the rest of the code expects
+    # Keep only columns the rest of the code expects (+ section_num for debug)
     cols = [
         "timestamp",
         "snapshot_date",
@@ -296,6 +274,7 @@ def load_sus_historic_daily() -> pd.DataFrame:
         "course_number",
         "course_code",
         "section",
+        "section_num",
         "section_label",
         "campus_code",
         "campus_simple",
@@ -366,6 +345,7 @@ def category_timeseries_chart(
     category: str,
     campus_domain: list[str] | None = None,
     days_domain: tuple[int, int] | None = None,
+    data_scope: str = "OSU",
 ) -> alt.Chart:
     df_cat = df[df["coreed_cat4"] == category]
     if df_cat.empty:
@@ -420,6 +400,11 @@ def category_timeseries_chart(
         color=alt.Color(
             "campus_simple:N",
             title="Campus",
+            scale=alt.Scale(
+                domain=["Corvallis", "Ecampus", "Cascades", "Other"],
+                range=["#4c78a8", "#e45756", "#72b7b2", "#999999"],
+            ),
+            sort=["Corvallis", "Ecampus", "Cascades", "Other"],
         ),
         shape=alt.Shape(
             "metric:N",
@@ -454,7 +439,8 @@ def category_timeseries_chart(
     point_layer = base.mark_point(size=60, filled=True)
 
     chart = line_layer + point_layer
-    return chart.properties(height=260, title=COREED_LABELS.get(category, category))
+    label = COREED_LABELS.get(category, category)
+    return chart.properties(height=260, title=f"{label} ({data_scope})")
 
 
 # ---------- Main ----------
@@ -477,19 +463,6 @@ def main():
         # load_sus_historic_daily already sets is_historic=True, but ensure it:
         df_hist["is_historic"] = True
 
-    # --- DEBUG: show historic SUS campus breakdown ---
-    if not df_hist.empty:
-        with st.expander("Debug: historic SUS rows by term & campus"):
-            debug_counts = (
-                df_hist
-                .groupby(["term_srcdb", "campus_simple"], as_index=False)
-                .size()
-                .pivot(index="term_srcdb", columns="campus_simple", values="size")
-                .fillna(0)
-                .astype(int)
-            )
-            st.dataframe(debug_counts)
-
     if df_raw.empty and df_hist.empty:
         st.warning("No SUS data available.")
         return
@@ -499,16 +472,6 @@ def main():
         df_all = pd.concat([df_raw, df_hist], ignore_index=True)
     else:
         df_all = df_raw.copy()
-
-    # --- DEBUG: show what we actually loaded from the historic table ---
-    if not df_hist.empty:
-        st.sidebar.caption(
-            "Historic SUS table: "
-            f"{len(df_hist)} rows, terms = "
-            + ", ".join(sorted(map(str, df_hist["term_srcdb"].dropna().unique())))
-        )
-    else:
-        st.sidebar.caption("Historic SUS table: no rows loaded from sus_daily_registrations_2025")
 
     # Use df_all for sidebar option ranges
     df_filters = df_all.copy()
@@ -558,7 +521,7 @@ def main():
         default=course_values,
     )
 
-    include_labs = st.sidebar.checkbox("Include labs (010, 011, ...)", value=False)
+    include_labs = st.sidebar.checkbox("Include labs (010–029)", value=False)
 
     agg_options = ["Section", "Course", "Campus"]
     agg_choice = st.sidebar.selectbox("Aggregation level", agg_options, index=0)
@@ -627,7 +590,7 @@ def main():
                         "term_group",   # keep current vs prior separated
                     ],
                     as_index=False,
-                )["enrolled"]
+                )[["enrolled", "capacity"]]
                 .max()
             )
             color_field = "section_label"
@@ -636,7 +599,7 @@ def main():
             df_plot = df.groupby(
                 ["snapshot_date", "days_from_start", "course_code"],
                 as_index=False,
-            )["enrolled"].sum()
+            )[["enrolled", "capacity"]].sum()
             df_plot["series_label"] = df_plot["course_code"]
             color_field = "series_label"
             y_title = "Enrollment (sum across sections)"
@@ -644,7 +607,7 @@ def main():
             df_plot = df.groupby(
                 ["snapshot_date", "days_from_start", "campus_simple"],
                 as_index=False,
-            )["enrolled"].sum()
+            )[["enrolled", "capacity"]].sum()
             df_plot["series_label"] = df_plot["campus_simple"]
             color_field = "series_label"
             y_title = "Enrollment (sum across all courses)"
@@ -657,8 +620,15 @@ def main():
             raw_min = int(df_plot["days_from_start"].min())
             raw_max = int(df_plot["days_from_start"].max())
 
-            # Default window: clamp to [-60, +20] if data extend that far
-            default_min = max(raw_min, -60)
+            # Default window: start 2 days before the earliest day with
+            # non-zero enrollment (not just the earliest snapshot).
+            # Clamp so default never falls outside the slider's [raw_min, raw_max].
+            enrolled_days = df_plot.loc[
+                pd.to_numeric(df_plot["enrolled"], errors="coerce") > 0,
+                "days_from_start",
+            ]
+            first_enrolled = int(enrolled_days.min()) if not enrolled_days.empty else raw_min
+            default_min = max(first_enrolled - 2, raw_min)
             default_max = min(raw_max, 20)
 
             sus_min_days, sus_max_days = st.sidebar.slider(
@@ -761,6 +731,33 @@ def main():
             )
             chart = base.mark_line() + base.mark_point(filled=True, size=60)
 
+        # Reference lines: cancellation notice deadlines
+        ref_lines_df = pd.DataFrame([
+            {"days_from_start": -18, "label": "Heads-up (day −18)"},
+            {"days_from_start": -14, "label": "Cancel notice (day −14)"},
+        ])
+        heads_up_rule = alt.Chart(ref_lines_df[ref_lines_df["days_from_start"] == -18]).mark_rule(
+            strokeDash=[6, 4], color="grey", strokeWidth=1,
+        ).encode(
+            x=alt.X("days_from_start:Q", scale=x_scale),
+            y=alt.value(0), y2=alt.value(350),
+        )
+        cancel_rule = alt.Chart(ref_lines_df[ref_lines_df["days_from_start"] == -14]).mark_rule(
+            color="grey", strokeWidth=1.5,
+        ).encode(
+            x=alt.X("days_from_start:Q", scale=x_scale),
+            y=alt.value(0), y2=alt.value(350),
+        )
+        # Labels at the top of the reference lines
+        ref_labels = alt.Chart(ref_lines_df).mark_text(
+            align="left", dx=3, dy=0, fontSize=9, color="grey",
+        ).encode(
+            x=alt.X("days_from_start:Q", scale=x_scale),
+            y=alt.value(8),
+            text="label:N",
+        )
+        chart = chart + heads_up_rule + cancel_rule + ref_labels
+
         chart = chart.properties(
             height=500,
             title=f"Enrollment trajectories ({agg_choice} view)",
@@ -776,28 +773,29 @@ def main():
             st.write(f"Latest snapshot date: {latest_date.date()}")
             if agg_choice == "Section":
                 latest = df_plot[df_plot["snapshot_date"] == latest_date][
-                    ["section_label", "campus_simple", "enrolled"]
+                    ["section_label", "campus_simple", "enrolled", "capacity"]
                 ].sort_values("section_label")
                 latest = latest.rename(
                     columns={
                         "section_label": "Section",
                         "campus_simple": "Campus",
                         "enrolled": "Enrolled",
+                        "capacity": "Capacity",
                     }
                 )
             elif agg_choice == "Course":
                 latest = df_plot[df_plot["snapshot_date"] == latest_date][
-                    ["series_label", "enrolled"]
+                    ["series_label", "enrolled", "capacity"]
                 ].sort_values("series_label")
                 latest = latest.rename(
-                    columns={"series_label": "Course", "enrolled": "Enrolled"}
+                    columns={"series_label": "Course", "enrolled": "Enrolled", "capacity": "Capacity"}
                 )
             else:
                 latest = df_plot[df_plot["snapshot_date"] == latest_date][
-                    ["series_label", "enrolled"]
+                    ["series_label", "enrolled", "capacity"]
                 ].sort_values("series_label")
                 latest = latest.rename(
-                    columns={"series_label": "Campus", "enrolled": "Enrolled"}
+                    columns={"series_label": "Campus", "enrolled": "Enrolled", "capacity": "Capacity"}
                 )
             st.dataframe(latest, width="stretch")
 
@@ -842,6 +840,11 @@ def main():
     include_labs_coreed = st.sidebar.checkbox(
         "CoreEd: Include lab/recitation sections", value=False
     )
+    cas_only_coreed = st.sidebar.checkbox(
+        "CoreEd: Show only CAS subjects",
+        value=False,
+        help="Filters to College of Agricultural Sciences subjects (e.g., AEC, ANS, HORT, SUS).",
+    )
 
     # Limit CoreEd campus options to the main three campuses; treat "Other" as out-of-scope for charts
     available_coreed_campuses = [
@@ -863,6 +866,10 @@ def main():
         ]
     if not include_labs_coreed:
         df_coreed_filt = df_coreed_filt[~df_coreed_filt["is_lab"]]
+    if cas_only_coreed:
+        df_coreed_filt = df_coreed_filt[
+            df_coreed_filt["subject"].isin(CAS_SUBJECT_CODES)
+        ]
     if campus_choice_coreed:
         df_coreed_filt = df_coreed_filt[
             df_coreed_filt["campus_simple"].isin(campus_choice_coreed)
@@ -879,6 +886,17 @@ def main():
         f"CoreEd latest snapshot date: {df_coreed_filt['snapshot_date'].max()}"
     )
 
+    # Build a shared x-axis domain that covers both the SUS slider range
+    # and the CoreEd data range, so CoreEd charts aren't clipped.
+    coreed_days_domain = sus_days_domain
+    if not df_coreed_filt.empty and sus_days_domain is not None:
+        coreed_min = int(df_coreed_filt["days_from_start"].min())
+        coreed_max = int(df_coreed_filt["days_from_start"].max())
+        shared_min = min(sus_days_domain[0], coreed_min)
+        shared_max = max(sus_days_domain[1], coreed_max)
+        coreed_days_domain = (shared_min, shared_max)
+
+    coreed_scope = "CAS" if cas_only_coreed else "OSU"
     coreed_left, coreed_right = st.columns([3, 1])
     with coreed_left:
         for cat in ["CFSI", "CSSS", "CSDP", "CFSS"]:
@@ -888,7 +906,8 @@ def main():
                         df_coreed_filt,
                         cat,
                         campus_domain=campus_domain,
-                        days_domain=sus_days_domain,
+                        days_domain=coreed_days_domain,
+                        data_scope=coreed_scope,
                     ),
                     width="stretch",
                 )
@@ -902,6 +921,10 @@ def main():
     if coreed_term_choice:
         df_coreed_summary = df_coreed_summary[
             df_coreed_summary["term_srcdb"] == coreed_term_choice
+        ]
+    if cas_only_coreed:
+        df_coreed_summary = df_coreed_summary[
+            df_coreed_summary["subject"].isin(CAS_SUBJECT_CODES)
         ]
     if campus_choice_coreed:
         df_coreed_summary = df_coreed_summary[
@@ -1025,6 +1048,48 @@ def main():
             ),
             width="stretch",
         )
+
+    # ---------- Debug: historic SUS features (bottom of page) ----------
+    st.markdown("---")
+    if not df_hist.empty:
+        with st.expander("Debug: historic SUS rows by term & campus"):
+            debug_counts = (
+                df_hist
+                .groupby(["term_srcdb", "campus_simple"], as_index=False)
+                .size()
+                .pivot(index="term_srcdb", columns="campus_simple", values="size")
+                .fillna(0)
+                .astype(int)
+            )
+            st.dataframe(debug_counts)
+
+            st.caption(
+                "Historic SUS table: "
+                f"{len(df_hist)} rows, terms = "
+                + ", ".join(sorted(map(str, df_hist["term_srcdb"].dropna().unique())))
+            )
+
+        with st.expander("Debug: historic SUS loader (section_num & campus)"):
+            debug_cols = ["term_srcdb", "course_number", "section", "campus_simple", "enrolled"]
+            if "section_num" in df_hist.columns:
+                debug_cols.insert(3, "section_num")
+            st.write(
+                df_hist[debug_cols]
+                .sort_values(["term_srcdb", "course_number", "section"])
+                .head(40)
+            )
+            dbg = (
+                df_hist.groupby(["term_srcdb", "campus_simple"], as_index=False)
+                .size()
+                .pivot(index="term_srcdb", columns="campus_simple", values="size")
+                .fillna(0)
+                .astype(int)
+            )
+            st.write("Row counts by term & campus (from loader):")
+            st.dataframe(dbg)
+    else:
+        with st.expander("Debug: historic SUS data"):
+            st.caption("No rows loaded from sus_daily_registrations_2025")
 
 
 if __name__ == "__main__":

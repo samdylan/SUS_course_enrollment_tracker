@@ -905,7 +905,8 @@ def main():
         cat_df = df_latest[df_latest["coreed_attr"] == cat]
         if cat_df.empty:
             continue
-        cat_label = cat_df["coreed_label"].iloc[0]
+        scope_tag = "CAS" if cas_only else "OSU"
+        cat_label = f"{cat_df['coreed_label'].iloc[0]} ({scope_tag})"
         left = build_category_aggregate_chart(cat_df, cat_label, term_order, daily_latest=df_coreed_daily_latest)
         right = build_course_chart(
             cat_df,
