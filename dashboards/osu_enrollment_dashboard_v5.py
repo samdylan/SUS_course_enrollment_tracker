@@ -668,6 +668,15 @@ def main():
                 range=["circle", "triangle-up", "square", "diamond"],
             )
 
+            sus_tooltips = [
+                alt.Tooltip("snapshot_date:T", title="Snapshot date"),
+                alt.Tooltip("days_from_start:Q", title="Days from start"),
+                alt.Tooltip("section_label:N", title="Section"),
+                alt.Tooltip("campus_simple:N", title="Campus"),
+                alt.Tooltip("enrolled:Q", title="Enrolled", format=",.0f"),
+                alt.Tooltip("capacity:Q", title="Capacity", format=",.0f"),
+            ]
+
             # Prior-term layer – black/grey, drawn FIRST
             hist_layer = alt.Chart(df_hist_plot).mark_line(
                 color="black",
@@ -681,6 +690,7 @@ def main():
                     legend=None,
                 ),
                 detail="section_label:N",
+                tooltip=sus_tooltips,
             )
 
             # Current term – colored by section, on top
@@ -697,6 +707,7 @@ def main():
                     scale=stroke_dash_scale,
                     legend=None,
                 ),
+                tooltip=sus_tooltips,
             )
 
             cur_line = cur_base.mark_line()
@@ -720,6 +731,13 @@ def main():
                 chart = chart + text_layer
 
         else:
+            agg_tooltips = [
+                alt.Tooltip("snapshot_date:T", title="Snapshot date"),
+                alt.Tooltip("days_from_start:Q", title="Days from start"),
+                alt.Tooltip(f"{color_field}:N", title=agg_choice),
+                alt.Tooltip("enrolled:Q", title="Enrolled", format=",.0f"),
+                alt.Tooltip("capacity:Q", title="Capacity", format=",.0f"),
+            ]
             base = alt.Chart(df_plot).encode(
                 x=x_enc,
                 y=alt.Y("enrolled:Q", title=y_title),
@@ -728,6 +746,7 @@ def main():
                     title=agg_choice,
                     legend=alt.Legend(orient="right"),
                 ),
+                tooltip=agg_tooltips,
             )
             chart = base.mark_line() + base.mark_point(filled=True, size=60)
 
@@ -801,7 +820,7 @@ def main():
 
     # ---- CoreEd daily section ----
     st.markdown("---")
-    st.header("CoreEd Daily Snapshot (from coreed_daily_sections)")
+    st.header("CoreEd Daily Snapshot")
 
     if df_coreed.empty:
         st.info(
@@ -883,7 +902,7 @@ def main():
         ]
 
     st.caption(
-        f"CoreEd latest snapshot date: {df_coreed_filt['snapshot_date'].max()}"
+        f"Latest snapshot: {df_coreed_filt['snapshot_date'].max()} · source: coreed_daily_sections"
     )
 
     # Build a shared x-axis domain that covers both the SUS slider range
