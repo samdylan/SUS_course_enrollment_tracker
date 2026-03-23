@@ -23,8 +23,8 @@ Optional:
     (Forces a look-ahead term refresh into coreed_capacity; runs even outside window)
 
 Notes:
-  - On the 1st and 15th (OSU local date), the script refreshes CoreEd capacity for the look-ahead term
-    (current term srcdb + 1) into `coreed_capacity`.
+  - On the 1st and 15th (OSU local date), the script refreshes CoreEd capacity for two look-ahead terms
+    (current term srcdb + 1 and + 2) into `coreed_capacity`, enabling year-over-year comparison.
 """
 
 import datetime as dt
@@ -961,31 +961,38 @@ def main() -> None:
             print("\n[daily] Outside window: skipping daily SUS/CoreEd snapshots.")
 
         # -----------------
-        # Capacity refresh (look-ahead term) — runs on 1st/15th (OSU date) or forced
+        # Capacity refresh (look-ahead terms) — runs on 1st/15th (OSU date) or forced
+        # Pulls current+1 AND current+2 so we always have the same-quarter-next-year
+        # term available for year-over-year comparison in the dashboard.
         # -----------------
         if should_run_capacity_refresh:
             base_srcdb = srcdb
-            lookahead_srcdb = next_srcdb(base_srcdb, 1)
+            lookahead_terms = [
+                next_srcdb(base_srcdb, 1),
+                next_srcdb(base_srcdb, 2),
+            ]
             print(
-                "\n=== CoreEd capacity refresh (scheduled/forced; look-ahead term) ===\n"
-                f"Base term srcdb={base_srcdb} → look-ahead srcdb={lookahead_srcdb}"
+                "\n=== CoreEd capacity refresh (scheduled/forced; look-ahead terms) ===\n"
+                f"Base term srcdb={base_srcdb} → look-ahead: {', '.join(lookahead_terms)}"
             )
 
-            cap_frames: List[pd.DataFrame] = []
-            for attr in COREED_ATTRS:
-                print(f"CoreEd {attr}: search…")
-                raw = fetch_search_coreed_attr(session, lookahead_srcdb, attr)
-                df_attr = normalize_coreed_results(raw, srcdb=lookahead_srcdb, coreed_attr=attr)
-                print(f"  {attr}: {len(df_attr)} sections (pre-details)")
-                if not df_attr.empty:
-                    df_attr = enrich_with_details(df_attr, srcdb=lookahead_srcdb, session=session)
-                    cap_frames.append(df_attr)
+            for lookahead_srcdb in lookahead_terms:
+                print(f"\n--- Refreshing look-ahead term {lookahead_srcdb} ---")
+                cap_frames: List[pd.DataFrame] = []
+                for attr in COREED_ATTRS:
+                    print(f"CoreEd {attr}: search…")
+                    raw = fetch_search_coreed_attr(session, lookahead_srcdb, attr)
+                    df_attr = normalize_coreed_results(raw, srcdb=lookahead_srcdb, coreed_attr=attr)
+                    print(f"  {attr}: {len(df_attr)} sections (pre-details)")
+                    if not df_attr.empty:
+                        df_attr = enrich_with_details(df_attr, srcdb=lookahead_srcdb, session=session)
+                        cap_frames.append(df_attr)
 
-            df_cap = pd.concat(cap_frames, ignore_index=True) if cap_frames else pd.DataFrame()
-            if not df_cap.empty:
-                refresh_coreed_capacity_to_db(df_cap, DB_PATH)
-            else:
-                print("CoreEd capacity refresh: no rows fetched; nothing to write.")
+                df_cap = pd.concat(cap_frames, ignore_index=True) if cap_frames else pd.DataFrame()
+                if not df_cap.empty:
+                    refresh_coreed_capacity_to_db(df_cap, DB_PATH)
+                else:
+                    print(f"CoreEd capacity refresh ({lookahead_srcdb}): no rows fetched; nothing to write.")
         else:
             print("\n[capacity] Not a scheduled capacity refresh day; skipping look-ahead refresh.")
 
