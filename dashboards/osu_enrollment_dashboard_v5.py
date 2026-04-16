@@ -631,6 +631,11 @@ def main():
             default_min = max(first_enrolled - 2, raw_min)
             default_max = min(raw_max, 20)
 
+            # Guard: slider requires min_value < max_value
+            if raw_min >= raw_max:
+                raw_max = raw_min + 10  # expand range so slider works
+                default_max = raw_max
+
             sus_min_days, sus_max_days = st.sidebar.slider(
                 "SUS: X-axis range (days from start)",
                 min_value=raw_min,
@@ -678,10 +683,16 @@ def main():
             ]
 
             # Prior-term layer – black/grey, drawn FIRST
-            hist_layer = alt.Chart(df_hist_plot).mark_line(
-                color="black",
-                opacity=0.45,
-            ).encode(
+            hist_tooltips = [
+                alt.Tooltip("snapshot_date:T", title="Snapshot date"),
+                alt.Tooltip("days_from_start:Q", title="Days from start"),
+                alt.Tooltip("section_label:N", title="Section"),
+                alt.Tooltip("campus_simple:N", title="Campus"),
+                alt.Tooltip("enrolled:Q", title="Enrolled", format=",.0f"),
+                alt.Tooltip("capacity:Q", title="Capacity", format=",.0f"),
+                alt.Tooltip("term_srcdb:N", title="Term"),
+            ]
+            hist_base = alt.Chart(df_hist_plot).encode(
                 x=x_enc,
                 y=alt.Y("enrolled:Q", title=y_title),
                 strokeDash=alt.StrokeDash(
@@ -690,8 +701,27 @@ def main():
                     legend=None,
                 ),
                 detail="section_label:N",
-                tooltip=sus_tooltips,
+                tooltip=hist_tooltips,
             )
+            hist_lines = hist_base.mark_line(color="black", opacity=0.45)
+            # Prior-term points: match current-term color & shape but at reduced opacity
+            hist_points = alt.Chart(df_hist_plot).mark_point(
+                opacity=0.4, size=30, filled=True,
+            ).encode(
+                x=x_enc,
+                y=alt.Y("enrolled:Q", title=y_title),
+                color=alt.Color(
+                    f"{color_field}:N",
+                    legend=None,  # don't duplicate the current-term legend
+                ),
+                shape=alt.Shape(
+                    "campus_simple:N",
+                    scale=shape_scale,
+                    legend=None,
+                ),
+                tooltip=hist_tooltips,
+            )
+            hist_layer = hist_lines + hist_points
 
             # Current term – colored by section, on top
             cur_base = alt.Chart(df_cur_plot).encode(

@@ -109,6 +109,10 @@ def estimate_classes_begin(year: int, term: str) -> dt.date:
 
     raise ValueError(f"Unsupported term for classes_begin: {term}")
 
+# Summer registration opens much earlier relative to classes_begin than other terms,
+# so it needs a wider pre-window to avoid a gap after spring ends.
+WINDOW_DAYS_BEFORE = {"Summer": 73, "Fall": 50, "Winter": 50, "Spring": 50}
+
 def determine_term_for_today(today: Optional[dt.date] = None) -> Dict[str, Any]:
     if today is None:
         today = osu_today()
@@ -117,9 +121,13 @@ def determine_term_for_today(today: Optional[dt.date] = None) -> Dict[str, Any]:
     for year in range(today.year - 1, today.year + 2):
         for term_name, code in TERM_CODE_MAP.items():
             classes_begin = estimate_classes_begin(year, term_name)
-            window_start = classes_begin - dt.timedelta(days=50)
+            days_before = WINDOW_DAYS_BEFORE.get(term_name, 50)
+            window_start = classes_begin - dt.timedelta(days=days_before)
             window_end = classes_begin + dt.timedelta(days=6)
-            srcdb = f"{classes_begin.year}{code}"
+            # OSU convention: Summer belongs to the next academic year
+            # (e.g., Summer 2026 sessions → srcdb 202700, not 202600)
+            label_year = classes_begin.year + 1 if term_name == "Summer" else classes_begin.year
+            srcdb = f"{label_year}{code}"
             candidates.append(
                 dict(
                     srcdb=srcdb,
