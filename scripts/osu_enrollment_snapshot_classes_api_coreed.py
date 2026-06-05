@@ -936,37 +936,53 @@ def main() -> None:
             print("\n[prior-term] Not first day of window (or forced srcdb); skipping prior-term CoreEd refresh.")
 
         # -----------------
-        # Daily snapshots (current term) — only within window
+        # Daily snapshots — capture current term AND next term every day.
+        # Capturing next term enables tracking priority registration for
+        # the upcoming term (e.g., Fall starts enrolling while Summer is
+        # still active). Empty responses are harmless and just skip the write.
         # -----------------
         if should_run_daily:
-            # ---- SUS ----
-            print("\n=== SUS snapshot ===")
-            raw_sus = fetch_search_keyword(session, srcdb, keyword="SUS")
-            df_sus = normalize_sus_results(raw_sus, srcdb=srcdb)
-            print(f"SUS: {len(df_sus)} sections after filtering (pre-details)")
-            if not df_sus.empty:
-                df_sus = enrich_with_details(df_sus, srcdb=srcdb, session=session)
-                append_sus_to_db(df_sus, DB_PATH)
+            daily_terms = [srcdb, next_srcdb(srcdb, 1)]
 
-            # ---- CoreEd daily ----
-            print("\n=== CoreEd snapshot (daily; current term) ===")
-            coreed_frames: List[pd.DataFrame] = []
-            for attr in COREED_ATTRS:
-                print(f"CoreEd {attr}: search…")
-                raw = fetch_search_coreed_attr(session, srcdb, attr)
-                df_attr = normalize_coreed_results(raw, srcdb=srcdb, coreed_attr=attr)
-                print(f"  {attr}: {len(df_attr)} sections (pre-details)")
-                if not df_attr.empty:
-                    df_attr = enrich_with_details(df_attr, srcdb=srcdb, session=session)
-                    coreed_frames.append(df_attr)
+            for daily_srcdb in daily_terms:
+                term_label = "current" if daily_srcdb == srcdb else "next"
+                # ---- SUS ----
+                print(f"\n=== SUS snapshot ({term_label} term: {daily_srcdb}) ===")
+                try:
+                    raw_sus = fetch_search_keyword(session, daily_srcdb, keyword="SUS")
+                except RuntimeError as e:
+                    print(f"  SUS search failed for {daily_srcdb}: {e}")
+                    raw_sus = None
+                if raw_sus is not None:
+                    df_sus = normalize_sus_results(raw_sus, srcdb=daily_srcdb)
+                    print(f"SUS: {len(df_sus)} sections after filtering (pre-details)")
+                    if not df_sus.empty:
+                        df_sus = enrich_with_details(df_sus, srcdb=daily_srcdb, session=session)
+                        append_sus_to_db(df_sus, DB_PATH)
 
-            df_coreed = pd.concat(coreed_frames, ignore_index=True) if coreed_frames else pd.DataFrame()
-            if not df_coreed.empty:
-                append_coreed_to_db(df_coreed, DB_PATH)
-                if backfill_coreed:
-                    append_coreed_backfill_to_db(df_coreed, DB_PATH)
-            else:
-                print("CoreEd (daily): no rows fetched; nothing to append.")
+                # ---- CoreEd daily ----
+                print(f"\n=== CoreEd snapshot ({term_label} term: {daily_srcdb}) ===")
+                coreed_frames: List[pd.DataFrame] = []
+                for attr in COREED_ATTRS:
+                    print(f"CoreEd {attr}: search…")
+                    try:
+                        raw = fetch_search_coreed_attr(session, daily_srcdb, attr)
+                    except RuntimeError as e:
+                        print(f"  CoreEd {attr} search failed for {daily_srcdb}: {e}")
+                        continue
+                    df_attr = normalize_coreed_results(raw, srcdb=daily_srcdb, coreed_attr=attr)
+                    print(f"  {attr}: {len(df_attr)} sections (pre-details)")
+                    if not df_attr.empty:
+                        df_attr = enrich_with_details(df_attr, srcdb=daily_srcdb, session=session)
+                        coreed_frames.append(df_attr)
+
+                df_coreed = pd.concat(coreed_frames, ignore_index=True) if coreed_frames else pd.DataFrame()
+                if not df_coreed.empty:
+                    append_coreed_to_db(df_coreed, DB_PATH)
+                    if backfill_coreed and daily_srcdb == srcdb:
+                        append_coreed_backfill_to_db(df_coreed, DB_PATH)
+                else:
+                    print(f"CoreEd (daily, {daily_srcdb}): no rows fetched; nothing to append.")
         else:
             print("\n[daily] Outside window: skipping daily SUS/CoreEd snapshots.")
 

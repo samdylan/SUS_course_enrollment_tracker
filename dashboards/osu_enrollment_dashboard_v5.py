@@ -483,17 +483,51 @@ def main():
     raw_terms = df_filters["term_srcdb"].dropna().astype(str).unique().tolist()
     term_values = sorted(raw_terms, key=int, reverse=True)
 
-    # Default to the most recent term that has non-zero enrollment.
-    # This avoids defaulting to a future term where registration hasn't started yet.
-    default_terms = []
+    # Identify the most-active term (most recent with non-zero enrollment)
+    # and the next term up (if it has any data) so we can offer a quick toggle.
+    active_term = None
+    next_term = None
     if term_values:
         for t in term_values:  # already sorted newest-first
             term_df = df_filters[df_filters["term_srcdb"].astype(str) == t]
             if (pd.to_numeric(term_df["enrolled"], errors="coerce") > 0).any():
-                default_terms = [t]
+                active_term = t
                 break
-        if not default_terms:
-            default_terms = [term_values[0]]
+        if active_term is None:
+            active_term = term_values[0]
+
+        # Find next term (one srcdb above active_term) if present in data
+        try:
+            active_int = int(active_term)
+            year = active_int // 100
+            code = active_int % 100
+            seq = [0, 1, 2, 3]
+            idx = seq.index(code) if code in seq else -1
+            if idx >= 0:
+                idx += 1
+                if idx >= len(seq):
+                    idx = 0
+                    year += 1
+                candidate = f"{year}{seq[idx]:02d}"
+                if candidate in term_values:
+                    next_term = candidate
+        except (ValueError, IndexError):
+            pass
+
+    # Quick toggle: switch the displayed term to the next term ahead.
+    # Only show the toggle if there's actually a next term available.
+    show_next = False
+    if next_term is not None:
+        show_next = st.sidebar.checkbox(
+            f"Show next term ({next_term}) instead of {active_term}",
+            value=False,
+            key="show_next_term",
+        )
+
+    if show_next:
+        default_terms = [next_term]
+    else:
+        default_terms = [active_term] if active_term else []
 
     term_choice = st.sidebar.multiselect(
         "Terms (srcdb)",
