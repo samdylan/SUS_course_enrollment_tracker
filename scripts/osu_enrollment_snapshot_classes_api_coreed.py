@@ -936,16 +936,22 @@ def main() -> None:
             print("\n[prior-term] Not first day of window (or forced srcdb); skipping prior-term CoreEd refresh.")
 
         # -----------------
-        # Daily snapshots — capture current term AND next term every day.
-        # Capturing next term enables tracking priority registration for
-        # the upcoming term (e.g., Fall starts enrolling while Summer is
-        # still active). Empty responses are harmless and just skip the write.
+        # Daily snapshots — capture current term every day, and additionally
+        # capture the next term ONLY when current is Summer.
+        # OSU has Fall-only priority registration that opens during Summer,
+        # so during the Summer window we also want daily Fall data. For other
+        # term windows, the next term doesn't open registration far enough
+        # in advance to justify daily polling.
         # -----------------
         if should_run_daily:
-            daily_terms = [srcdb, next_srcdb(srcdb, 1)]
+            daily_terms = [srcdb]
+            # If current is Summer (code "00"), also capture Fall (the next term).
+            if str(srcdb).endswith("00"):
+                daily_terms.append(next_srcdb(srcdb, 1))
 
             for daily_srcdb in daily_terms:
-                term_label = "current" if daily_srcdb == srcdb else "next"
+                is_next_term = daily_srcdb != srcdb
+                term_label = "current" if not is_next_term else "next"
                 # ---- SUS ----
                 print(f"\n=== SUS snapshot ({term_label} term: {daily_srcdb}) ===")
                 try:
@@ -958,7 +964,15 @@ def main() -> None:
                     print(f"SUS: {len(df_sus)} sections after filtering (pre-details)")
                     if not df_sus.empty:
                         df_sus = enrich_with_details(df_sus, srcdb=daily_srcdb, session=session)
-                        append_sus_to_db(df_sus, DB_PATH)
+                        # For the next term: skip the DB write until at least
+                        # one section has non-zero enrollment (priority reg open).
+                        if is_next_term and not (
+                            pd.to_numeric(df_sus.get("enrolled"), errors="coerce") > 0
+                        ).any():
+                            print(f"SUS ({daily_srcdb}): all enrollments zero; "
+                                  "skipping DB write (priority reg not yet open).")
+                        else:
+                            append_sus_to_db(df_sus, DB_PATH)
 
                 # ---- CoreEd daily ----
                 print(f"\n=== CoreEd snapshot ({term_label} term: {daily_srcdb}) ===")
@@ -978,9 +992,17 @@ def main() -> None:
 
                 df_coreed = pd.concat(coreed_frames, ignore_index=True) if coreed_frames else pd.DataFrame()
                 if not df_coreed.empty:
-                    append_coreed_to_db(df_coreed, DB_PATH)
-                    if backfill_coreed and daily_srcdb == srcdb:
-                        append_coreed_backfill_to_db(df_coreed, DB_PATH)
+                    # For the next term: skip the DB write until at least one
+                    # section has non-zero enrollment (priority reg open).
+                    if is_next_term and not (
+                        pd.to_numeric(df_coreed.get("enrolled"), errors="coerce") > 0
+                    ).any():
+                        print(f"CoreEd ({daily_srcdb}): all enrollments zero; "
+                              "skipping DB write (priority reg not yet open).")
+                    else:
+                        append_coreed_to_db(df_coreed, DB_PATH)
+                        if backfill_coreed and daily_srcdb == srcdb:
+                            append_coreed_backfill_to_db(df_coreed, DB_PATH)
                 else:
                     print(f"CoreEd (daily, {daily_srcdb}): no rows fetched; nothing to append.")
         else:
