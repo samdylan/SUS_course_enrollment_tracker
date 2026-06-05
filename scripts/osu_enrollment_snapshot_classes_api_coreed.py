@@ -202,7 +202,7 @@ def _post_json_retry(
     payload: Dict[str, Any],
     referer: str,
     label: str,
-    max_tries: int = 4,
+    max_tries: int = 8,
     timeout: int = 30,
 ) -> Dict[str, Any]:
     headers = _browser_headers(referer)
@@ -228,7 +228,9 @@ def _post_json_retry(
             or not body.strip()
             or "text/html" in ct
         ):
-            wait = min(2 ** attempt, 20) + random.uniform(0, 0.25)
+            # Exponential backoff capped at 30s per attempt.
+            # Total budget with max_tries=8: ~2.5 minutes.
+            wait = min(2 ** attempt, 30) + random.uniform(0, 0.5)
             print(f"[{label}] retry {attempt}/{max_tries} (status={resp.status_code}, ct={ct!r}); wait {wait:.2f}s")
             time.sleep(wait)
             continue

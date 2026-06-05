@@ -588,6 +588,7 @@ def main():
                         "section_label",
                         "campus_simple",
                         "term_group",   # keep current vs prior separated
+                        "term_srcdb",   # keep separate prior-term lines distinct
                     ],
                     as_index=False,
                 )[["enrolled", "capacity"]]
@@ -700,7 +701,7 @@ def main():
                     scale=stroke_dash_scale,
                     legend=None,
                 ),
-                detail="section_label:N",
+                detail=["section_label:N", "term_srcdb:N"],
                 tooltip=hist_tooltips,
             )
             hist_lines = hist_base.mark_line(color="black", opacity=0.45)
@@ -750,6 +751,55 @@ def main():
             )
 
             chart = hist_layer + cur_line + cur_points
+
+            # Durable end-of-line labels: section name on the most recent
+            # current-term data point, and on the matching same-day prior-term
+            # data point. Helps when the chart is screenshot-shared.
+            if not df_cur_plot.empty:
+                cur_latest_idx = (
+                    df_cur_plot.groupby("section_label")["days_from_start"].idxmax()
+                )
+                df_cur_labels = df_cur_plot.loc[cur_latest_idx]
+
+                cur_label_layer = alt.Chart(df_cur_labels).mark_text(
+                    align="left", dx=6, dy=-4, fontSize=9, fontWeight="bold",
+                ).encode(
+                    x=x_enc,
+                    y=alt.Y("enrolled:Q"),
+                    text=alt.Text("section_label:N"),
+                    color=alt.Color(f"{color_field}:N", legend=None),
+                )
+                chart = chart + cur_label_layer
+
+                # Prior-term labels: anchor to the prior-term data point that
+                # is 10 days *later* than the current-term latest, so the label
+                # sits on its line but is horizontally offset from the
+                # current-term labels.
+                if not df_hist_plot.empty:
+                    ref_day = int(df_cur_plot["days_from_start"].max()) + 10
+                    hist_with_diff = df_hist_plot.copy()
+                    hist_with_diff["_diff_to_ref"] = (
+                        hist_with_diff["days_from_start"] - ref_day
+                    ).abs()
+                    hist_idx = (
+                        hist_with_diff.groupby(
+                            ["section_label", "term_srcdb"]
+                        )["_diff_to_ref"].idxmin()
+                    )
+                    df_hist_labels = (
+                        hist_with_diff.loc[hist_idx]
+                        .drop(columns=["_diff_to_ref"])
+                    )
+
+                    hist_label_layer = alt.Chart(df_hist_labels).mark_text(
+                        align="left", dx=6, dy=-4, fontSize=9, opacity=0.85,
+                    ).encode(
+                        x=x_enc,
+                        y=alt.Y("enrolled:Q"),
+                        text=alt.Text("section_label:N"),
+                        color=alt.Color(f"{color_field}:N", legend=None),
+                    )
+                    chart = chart + hist_label_layer
 
             if show_labels:
                 text_layer = cur_base.mark_text(
