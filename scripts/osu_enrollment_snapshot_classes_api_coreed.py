@@ -948,17 +948,18 @@ def main() -> None:
 
         # -----------------
         # Daily snapshots — capture current term every day, and additionally
-        # capture the next term ONLY when current is Summer.
-        # OSU has Fall-only priority registration that opens during Summer,
-        # so during the Summer window we also want daily Fall data. For other
-        # term windows, the next term doesn't open registration far enough
-        # in advance to justify daily polling.
+        # capture Fall daily whenever it has priority registration underway.
+        # OSU's Fall priority registration opens in Spring and continues
+        # through Summer, so both Spring- and Summer-current windows also
+        # capture Fall. For Winter and Fall itself, no extra term is needed.
         # -----------------
         if should_run_daily:
             daily_terms = [srcdb]
-            # If current is Summer (code "00"), also capture Fall (the next term).
-            if str(srcdb).endswith("00"):
+            code = str(srcdb)[-2:]
+            if code == "00":       # Summer — Fall is 1 term ahead
                 daily_terms.append(next_srcdb(srcdb, 1))
+            elif code == "03":     # Spring — Fall is 2 terms ahead
+                daily_terms.append(next_srcdb(srcdb, 2))
 
             for daily_srcdb in daily_terms:
                 is_next_term = daily_srcdb != srcdb
