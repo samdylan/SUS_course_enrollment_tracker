@@ -109,9 +109,12 @@ def estimate_classes_begin(year: int, term: str) -> dt.date:
 
     raise ValueError(f"Unsupported term for classes_begin: {term}")
 
-# Summer registration opens much earlier relative to classes_begin than other terms,
-# so it needs a wider pre-window to avoid a gap after spring ends.
-WINDOW_DAYS_BEFORE = {"Summer": 73, "Fall": 50, "Winter": 50, "Spring": 50}
+# Some terms need wider pre-windows because registration opens well before
+# classes begin, or to avoid gaps between terms:
+# - Summer: 73 days closes the gap after Spring window ends
+# - Fall: 110 days covers priority registration (opens ~mid-June) and closes
+#   the gap between Summer window end (late June) and Fall's own window
+WINDOW_DAYS_BEFORE = {"Summer": 73, "Fall": 110, "Winter": 50, "Spring": 50}
 
 def determine_term_for_today(today: Optional[dt.date] = None) -> Dict[str, Any]:
     if today is None:
@@ -124,9 +127,16 @@ def determine_term_for_today(today: Optional[dt.date] = None) -> Dict[str, Any]:
             days_before = WINDOW_DAYS_BEFORE.get(term_name, 50)
             window_start = classes_begin - dt.timedelta(days=days_before)
             window_end = classes_begin + dt.timedelta(days=6)
-            # OSU convention: Summer belongs to the next academic year
-            # (e.g., Summer 2026 sessions → srcdb 202700, not 202600)
-            label_year = classes_begin.year + 1 if term_name == "Summer" else classes_begin.year
+            # OSU academic year convention:
+            # - Summer and Fall of calendar year Y belong to academic year Y+1
+            #   (e.g., Summer 2026 → 202700, Fall 2026 → 202701)
+            # - Winter and Spring of calendar year Y belong to academic year Y
+            #   (e.g., Winter 2026 → 202602, Spring 2026 → 202603)
+            label_year = (
+                classes_begin.year + 1
+                if term_name in ("Summer", "Fall")
+                else classes_begin.year
+            )
             srcdb = f"{label_year}{code}"
             candidates.append(
                 dict(
@@ -136,6 +146,7 @@ def determine_term_for_today(today: Optional[dt.date] = None) -> Dict[str, Any]:
                     classes_begin=classes_begin,
                     window_start=window_start,
                     window_end=window_end,
+                    # Display the calendar year the term happens in (not the AY)
                     term_label=f"{term_name} {classes_begin.year}",
                 )
             )
