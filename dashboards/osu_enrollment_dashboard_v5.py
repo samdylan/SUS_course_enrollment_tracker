@@ -109,20 +109,120 @@ def load_sus_data() -> pd.DataFrame:
     return df
 
 
-def estimate_classes_begin_from_srcdb(term_srcdb: str) -> pd.Timestamp | None:
+# ---------- Term start dates ("day zero") ----------
+#
+# Day zero on every chart is the first day of classes. Resolved from three
+# sources, in order:
+#
+#   1. OBSERVED. The classes.oregonstate.edu API already returns a start_date
+#      for every section and the snapshot script already logs it in the
+#      `enrollment` table. The modal value for a term is the registrar's first
+#      day of classes; the minority values are Ecampus and short-session
+#      sections that start earlier. This is self-maintaining: a new term gets
+#      a correct day zero as soon as one day of sections has been logged.
+#   2. PUBLISHED. REGISTRAR_TERM_START below, transcribed from OSU's 4-year
+#      calendar, for look-ahead terms with no logged sections yet.
+#   3. HEURISTIC. A weekday rule, last resort only.
+#
+# The heuristic used to be the only source, and it is wrong whenever a term
+# does not land on the last Wednesday/Monday of its month. It placed Fall 2026
+# at 30 Sep instead of 23 Sep: a seven-day error that shifted the whole series
+# and both cancellation reference lines. OSU's start dates drift back a day per
+# year and Fall 2028 begins on a Thursday, so no weekday rule can be relied on.
+
+REGISTRAR_TERM_START: dict[str, str] = {
+    # srcdb -> first day of classes (OSU Office of the Registrar, 4-year calendar)
+    # 2023-24
+    "202400": "2023-06-26", "202401": "2023-09-27",
+    "202402": "2024-01-08", "202403": "2024-04-01",
+    # 2024-25
+    "202500": "2024-06-24", "202501": "2024-09-25",
+    "202502": "2025-01-06", "202503": "2025-03-31",
+    # 2025-26
+    "202600": "2025-06-23", "202601": "2025-09-24",
+    "202602": "2026-01-05", "202603": "2026-03-30",
+    # 2026-27
+    "202700": "2026-06-22", "202701": "2026-09-23",
+    "202702": "2027-01-04", "202703": "2027-03-29",
+    # 2027-28
+    "202800": "2027-06-21", "202801": "2027-09-22",
+    "202802": "2028-01-03", "202803": "2028-03-27",
+    # 2028-29
+    "202900": "2028-06-20", "202901": "2028-09-21",
+    "202902": "2029-01-08", "202903": "2029-04-02",
+}
+
+_OBSERVED_TERM_STARTS: dict[str, pd.Timestamp] | None = None
+
+
+def observed_term_starts() -> dict[str, pd.Timestamp]:
+    """Modal section start_date per term, taken from the logged API payload."""
+    global _OBSERVED_TERM_STARTS
+    if _OBSERVED_TERM_STARTS is not None:
+        return _OBSERVED_TERM_STARTS
+
+    out: dict[str, pd.Timestamp] = {}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            obs = pd.read_sql_query(
+                "SELECT term_srcdb, start_date, COUNT(*) AS n "
+                "FROM enrollment "
+                "WHERE start_date IS NOT NULL AND TRIM(start_date) <> '' "
+                "GROUP BY term_srcdb, start_date",
+                conn,
+            )
+        finally:
+            conn.close()
+
+        if not obs.empty:
+            obs["start_date"] = pd.to_datetime(obs["start_date"], errors="coerce")
+            obs = obs.dropna(subset=["start_date"])
+            # Most common start_date wins; ties break to the earlier date.
+            obs = obs.sort_values(
+                ["term_srcdb", "n", "start_date"], ascending=[True, False, True]
+            )
+            for term, grp in obs.groupby("term_srcdb"):
+                out[str(term)] = grp.iloc[0]["start_date"].normalize()
+    except Exception:
+        # Day zero must never take the dashboard down; fall through to the table.
+        out = {}
+
+    # Cross-check the two authoritative sources against each other. A mismatch
+    # means either the published table has gone stale or OSU moved a term.
+    mismatches = [
+        f"{term}: sections say {ts.date()}, calendar table says {REGISTRAR_TERM_START[term]}"
+        for term, ts in sorted(out.items())
+        if term in REGISTRAR_TERM_START
+        and ts != pd.Timestamp(REGISTRAR_TERM_START[term]).normalize()
+    ]
+    if mismatches:
+        try:
+            st.sidebar.warning(
+                "Term start date mismatch (using the section data):\n\n- "
+                + "\n- ".join(mismatches)
+            )
+        except Exception:
+            pass
+
+    _OBSERVED_TERM_STARTS = out
+    return out
+
+
+def _heuristic_classes_begin_from_srcdb(term_srcdb: str) -> pd.Timestamp | None:
     """
-    Approximate classes-begin date from term code (srcdb like 202602),
-    using OSU's convention that:
+    Last-resort approximation of classes-begin from the term code (srcdb like
+    202602), using OSU's convention that:
 
       label_year = academic year, so:
         XX00 = Summer of (label_year - 1)
         XX01 = Fall   of (label_year - 1)
         XX02 = Winter of (label_year)
         XX03 = Spring of (label_year)
-    """
-    if not term_srcdb or len(str(term_srcdb)) < 6:
-        return None
 
+    Accurate only when the term happens to fall on the last Wednesday/Monday
+    of its month. Prefer observed_term_starts() or REGISTRAR_TERM_START.
+    """
     s = str(term_srcdb)
     try:
         label_year = int(s[:4])
@@ -130,36 +230,52 @@ def estimate_classes_begin_from_srcdb(term_srcdb: str) -> pd.Timestamp | None:
     except Exception:
         return None
 
-    # Summer: late June of (label_year - 1), approximate Monday in the last week of June
+    # Summer: approximate Monday in the last week of June of (label_year - 1)
     if term_code == "00":
-        year = label_year - 1
-        d = pd.Timestamp(year=year, month=6, day=24)
+        d = pd.Timestamp(year=label_year - 1, month=6, day=24)
         offset = (0 - d.weekday()) % 7  # move to Monday
         return (d + pd.Timedelta(days=offset)).normalize()
 
     # Fall: last Wednesday of September of (label_year - 1)
     if term_code == "01":
-        year = label_year - 1
-        d = pd.Timestamp(year=year, month=9, day=30)
+        d = pd.Timestamp(year=label_year - 1, month=9, day=30)
         while d.weekday() != 2:  # Wednesday
             d -= pd.Timedelta(days=1)
         return d.normalize()
 
     # Winter: first Monday in early January of label_year
     if term_code == "02":
-        year = label_year
-        d = pd.Timestamp(year=year, month=1, day=3)
+        d = pd.Timestamp(year=label_year, month=1, day=3)
         offset = (0 - d.weekday()) % 7  # Monday
         return (d + pd.Timedelta(days=offset)).normalize()
 
     # Spring: first Monday in late March of label_year
     if term_code == "03":
-        year = label_year
-        d = pd.Timestamp(year=year, month=3, day=29)
+        d = pd.Timestamp(year=label_year, month=3, day=29)
         offset = (0 - d.weekday()) % 7  # Monday
         return (d + pd.Timedelta(days=offset)).normalize()
 
     return None
+
+
+def estimate_classes_begin_from_srcdb(term_srcdb: str) -> pd.Timestamp | None:
+    """Day zero for a term: observed sections, then published calendar, then heuristic."""
+    if not term_srcdb:
+        return None
+    key = str(term_srcdb).strip()
+    if len(key) < 6:
+        return None
+
+    observed = observed_term_starts().get(key)
+    if observed is not None:
+        return observed
+
+    published = REGISTRAR_TERM_START.get(key)
+    if published:
+        return pd.Timestamp(published).normalize()
+
+    return _heuristic_classes_begin_from_srcdb(key)
+
 
 def load_sus_historic_daily() -> pd.DataFrame:
     """
@@ -340,16 +456,43 @@ def load_coreed_daily() -> pd.DataFrame:
 
 # ---------- CoreEd chart helper ----------
 
-def category_timeseries_chart(
+# Opacity for the prior-year background series in the CoreEd charts.
+PRIOR_YEAR_OPACITY = 0.28
+
+TERM_CODE_NAMES = {"00": "Summer", "01": "Fall", "02": "Winter", "03": "Spring"}
+
+
+def term_label(term_srcdb: str) -> str:
+    """202701 -> 'Fall 2026'. Falls back to the raw srcdb if it is not parseable."""
+    s = str(term_srcdb or "").strip()
+    if len(s) < 6 or not s[:4].isdigit():
+        return s
+    code = s[-2:]
+    # Academic-year labelling: summer and fall belong to (label_year - 1).
+    year = int(s[:4]) - 1 if code in ("00", "01") else int(s[:4])
+    return f"{TERM_CODE_NAMES.get(code, code)} {year}"
+
+
+def _coreed_category_frame(
     df: pd.DataFrame,
     category: str,
     campus_domain: list[str] | None = None,
-    days_domain: tuple[int, int] | None = None,
-    data_scope: str = "OSU",
-) -> alt.Chart:
+) -> pd.DataFrame:
+    """
+    Aggregate one CoreEd category to (day x campus x metric), ready to plot.
+
+    Extracted from category_timeseries_chart so the current term and the
+    prior-year term go through exactly the same aggregation, filtering and
+    campus ordering. Any divergence here would make the two series
+    incomparable, which is the whole point of the overlay.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     df_cat = df[df["coreed_cat4"] == category]
     if df_cat.empty:
-        return alt.Chart(pd.DataFrame({"msg": ["No data"]})).mark_text().encode(text="msg")
+        return pd.DataFrame()
+
     agg = (
         df_cat.groupby(
             ["snapshot_date", "days_from_start", "campus_simple"],
@@ -370,7 +513,7 @@ def category_timeseries_chart(
     ).dropna(subset=["value"])
 
     if melted.empty:
-        return alt.Chart(pd.DataFrame({"msg": ["No data"]})).mark_text().encode(text="msg")
+        return melted
 
     # Map metric labels for nicer legend and to match strokeDash domain
     melted["metric"] = melted["metric"].map({"enrolled": "Enrolled", "capacity": "Capacity"})
@@ -379,8 +522,31 @@ def category_timeseries_chart(
 
     domain = campus_domain or [c for c in CAMPUS_ORDER if c in melted["campus_simple"].unique()]
     melted["campus_simple"] = pd.Categorical(melted["campus_simple"], domain, ordered=True)
-    melted["series_count"] = melted.groupby(["campus_simple", "metric"])["value"].transform("count")
-    melted = melted.sort_values("snapshot_date")
+    melted["series_count"] = melted.groupby(
+        ["campus_simple", "metric"], observed=True
+    )["value"].transform("count")
+    return melted.sort_values("snapshot_date")
+
+
+def category_timeseries_chart(
+    df: pd.DataFrame,
+    category: str,
+    campus_domain: list[str] | None = None,
+    days_domain: tuple[int, int] | None = None,
+    data_scope: str = "OSU",
+    df_prior: pd.DataFrame | None = None,
+    prior_label: str | None = None,
+) -> alt.Chart:
+    """
+    CoreEd category trendline. If df_prior is supplied, the equivalent term
+    from the prior academic year is drawn underneath at low opacity, aligned
+    on days-from-start-of-term so the two registration ramps line up.
+    """
+    melted = _coreed_category_frame(df, category, campus_domain)
+    if melted.empty:
+        return alt.Chart(pd.DataFrame({"msg": ["No data"]})).mark_text().encode(text="msg")
+
+    prior = _coreed_category_frame(df_prior, category, campus_domain)
 
     # 👉 use SUS-provided days_domain if available; otherwise fall back to CoreEd's own min/max
     if days_domain is not None:
@@ -389,39 +555,44 @@ def category_timeseries_chart(
         min_days = int(melted["days_from_start"].min())
         max_days = int(melted["days_from_start"].max())
 
+    x_enc = alt.X(
+        "days_from_start:Q",
+        title="Days from start of term",
+        scale=alt.Scale(domain=[min_days, max_days]),
+        axis=alt.Axis(format="d"),
+    )
+    color_scale = alt.Scale(
+        domain=["Corvallis", "Ecampus", "Cascades", "Other"],
+        range=["#4c78a8", "#e45756", "#72b7b2", "#999999"],
+    )
+    shape_scale = alt.Scale(
+        domain=["Enrolled", "Capacity"],
+        range=["triangle-up", "circle"],  # Enrolled = triangle, Capacity = circle
+    )
+    dash_scale = alt.Scale(
+        domain=["Enrolled", "Capacity"],
+        range=[[4, 3], [1, 0]],          # Enrolled dashed, Capacity solid
+    )
+
     base = alt.Chart(melted).encode(
-        x=alt.X(
-            "days_from_start:Q",
-            title="Days from start of term",
-            scale=alt.Scale(domain=[min_days, max_days]),
-            axis=alt.Axis(format="d"),
-        ),
+        x=x_enc,
         y=alt.Y("value:Q", title="Headcount"),
         color=alt.Color(
             "campus_simple:N",
             title="Campus",
-            scale=alt.Scale(
-                domain=["Corvallis", "Ecampus", "Cascades", "Other"],
-                range=["#4c78a8", "#e45756", "#72b7b2", "#999999"],
-            ),
+            scale=color_scale,
             sort=["Corvallis", "Ecampus", "Cascades", "Other"],
         ),
         shape=alt.Shape(
             "metric:N",
             title="Metric",
             legend=alt.Legend(title="Metric"),
-            scale=alt.Scale(
-                domain=["Enrolled", "Capacity"],
-                range=["triangle-up", "circle"],  # Enrolled = triangle, Capacity = circle
-            ),
+            scale=shape_scale,
         ),
         strokeDash=alt.StrokeDash(
             "metric_dash:N",
             legend=None,
-            scale=alt.Scale(
-                domain=["Enrolled", "Capacity"],
-                range=[[4, 3], [1, 0]],          # Enrolled dashed, Capacity solid
-            ),
+            scale=dash_scale,
         ),
         tooltip=[
             alt.Tooltip("snapshot_date:T", title="Snapshot date"),
@@ -432,19 +603,44 @@ def category_timeseries_chart(
         ],
     )
 
+    layers = []
+
+    # Prior-year background: same campus colours and same dash convention, but
+    # faded, thinner and with no legend entries of its own, so the current term
+    # stays the figure and last year stays the ground.
+    if not prior.empty:
+        prior_tooltip_title = prior_label or "Prior year"
+        prior_base = alt.Chart(prior).encode(
+            x=x_enc,
+            y=alt.Y("value:Q", title="Headcount"),
+            color=alt.Color("campus_simple:N", scale=color_scale, legend=None),
+            strokeDash=alt.StrokeDash("metric_dash:N", scale=dash_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("snapshot_date:T", title=f"{prior_tooltip_title} snapshot"),
+                alt.Tooltip("days_from_start:Q", title="Days from start"),
+                alt.Tooltip("campus_simple:N", title="Campus"),
+                alt.Tooltip("metric:N", title="Metric"),
+                alt.Tooltip("value:Q", title=prior_tooltip_title, format=",.0f"),
+            ],
+        )
+        layers.append(prior_base.mark_line(opacity=PRIOR_YEAR_OPACITY, strokeWidth=1.2))
+        layers.append(
+            prior_base.mark_point(size=18, filled=True, opacity=PRIOR_YEAR_OPACITY).encode(
+                shape=alt.Shape("metric:N", scale=shape_scale, legend=None)
+            )
+        )
+
     # Lines: dashed vs solid by metric
-    line_layer = base.mark_line()
-
+    layers.append(base.mark_line())
     # Points: inherit shape/color from base, just make them visible markers
-    point_layer = base.mark_point(size=60, filled=True)
+    layers.append(base.mark_point(size=60, filled=True))
 
-    chart = line_layer + point_layer
+    chart = alt.layer(*layers)
     label = COREED_LABELS.get(category, category)
-    return chart.properties(height=260, title=f"{label} ({data_scope})")
-
-
-# ---------- Main ----------
-# ---------- Main ----------
+    title = f"{label} ({data_scope})"
+    if not prior.empty and prior_label:
+        title = f"{label} ({data_scope}) · {prior_label} behind"
+    return chart.properties(height=260, title=title)
 
 def main():
     st.set_page_config(page_title="SUS Enrollment Dashboard", layout="wide")
@@ -992,6 +1188,28 @@ def main():
         default=available_coreed_campuses,
     )
 
+    # Prior-year equivalent term: same term code, one academic year back.
+    prior_term_coreed = (
+        str(int(coreed_term_choice) - 100)
+        if coreed_term_choice and str(coreed_term_choice).isdigit()
+        else None
+    )
+    prior_term_available = (
+        prior_term_coreed is not None
+        and prior_term_coreed in set(df_coreed["term_srcdb"].dropna().astype(str))
+    )
+    show_prior_coreed = st.sidebar.checkbox(
+        "CoreEd: Overlay prior-year term",
+        value=False,
+        disabled=not prior_term_available,
+        help=(
+            f"Draws {term_label(prior_term_coreed)} behind the current term, aligned on "
+            "days from start of term. Uncheck to return to the current-term-only view."
+            if prior_term_available
+            else "No daily CoreEd snapshots logged for the prior-year equivalent term."
+        ),
+    )
+
     df_coreed_filt = df_coreed.copy()
     if coreed_term_choice:
         df_coreed_filt = df_coreed_filt[
@@ -1015,9 +1233,48 @@ def main():
             if c in df_coreed_filt["campus_simple"].unique()
         ]
 
+    def _apply_coreed_filters(source: pd.DataFrame, term: str) -> pd.DataFrame:
+        """Same lab / CAS / campus filters as the current term, so the two are comparable."""
+        out = source[source["term_srcdb"].astype(str) == str(term)].copy()
+        if not include_labs_coreed:
+            out = out[~out["is_lab"]]
+        if cas_only_coreed:
+            out = out[out["subject"].isin(CAS_SUBJECT_CODES)]
+        if campus_choice_coreed:
+            out = out[out["campus_simple"].isin(campus_choice_coreed)]
+        return out
+
+    df_coreed_prior = (
+        _apply_coreed_filters(df_coreed, prior_term_coreed)
+        if (show_prior_coreed and prior_term_available)
+        else pd.DataFrame()
+    )
+
     st.caption(
         f"Latest snapshot: {df_coreed_filt['snapshot_date'].max()} · source: coreed_daily_sections"
     )
+
+    if show_prior_coreed and prior_term_available:
+        prior_days = int(df_coreed_prior["snapshot_date"].nunique()) if not df_coreed_prior.empty else 0
+        if prior_days == 0:
+            st.warning(
+                f"{term_label(prior_term_coreed)} has no snapshots that survive the current "
+                "filters, so nothing will be drawn behind the current term."
+            )
+        elif prior_days < 5:
+            st.warning(
+                f"{term_label(prior_term_coreed)} has only {prior_days} logged snapshot "
+                f"day{'s' if prior_days != 1 else ''}, so the background series will be sparse "
+                "or fall outside the plotted window. Daily CoreEd logging began in December 2025, "
+                "so terms before Winter 2026 were never captured during their registration period."
+            )
+        else:
+            lo = int(df_coreed_prior["days_from_start"].min())
+            hi = int(df_coreed_prior["days_from_start"].max())
+            st.caption(
+                f"Background: {term_label(prior_term_coreed)}, {prior_days} snapshot days "
+                f"covering day {lo} to day {hi}."
+            )
 
     # Build a shared x-axis domain that covers both the SUS slider range
     # and the CoreEd data range, so CoreEd charts aren't clipped.
@@ -1028,6 +1285,15 @@ def main():
         shared_min = min(sus_days_domain[0], coreed_min)
         shared_max = max(sus_days_domain[1], coreed_max)
         coreed_days_domain = (shared_min, shared_max)
+
+    # The prior-year series lives on the same relative axis but can extend past
+    # the current term's range (it usually runs further to the right, having
+    # already finished). Widen the window so it is not silently clipped.
+    if not df_coreed_prior.empty and coreed_days_domain is not None:
+        coreed_days_domain = (
+            min(coreed_days_domain[0], int(df_coreed_prior["days_from_start"].min())),
+            max(coreed_days_domain[1], int(df_coreed_prior["days_from_start"].max())),
+        )
 
     coreed_scope = "CAS" if cas_only_coreed else "OSU"
     coreed_left, coreed_right = st.columns([3, 1])
@@ -1041,6 +1307,12 @@ def main():
                         campus_domain=campus_domain,
                         days_domain=coreed_days_domain,
                         data_scope=coreed_scope,
+                        df_prior=df_coreed_prior,
+                        prior_label=(
+                            term_label(prior_term_coreed)
+                            if not df_coreed_prior.empty
+                            else None
+                        ),
                     ),
                     width="stretch",
                 )
