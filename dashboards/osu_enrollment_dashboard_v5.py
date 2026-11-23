@@ -15,6 +15,10 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rebalancing import render_rebalancing_panel  # noqa: E402
+
 # Allow override (useful for Streamlit Cloud / servers / different repo layouts)
 # Example: export ENROLLMENT_DB_PATH="/path/to/osu_enrollment_log_classes.db"
 DB_PATH = Path(os.environ.get("ENROLLMENT_DB_PATH", "")).expanduser() if os.environ.get("ENROLLMENT_DB_PATH") else (
@@ -1127,6 +1131,10 @@ def main():
                     columns={"series_label": "Campus", "enrolled": "Enrolled", "capacity": "Capacity"}
                 )
             st.dataframe(latest, width="stretch")
+
+    # ---- Projected final enrolment (in-term rebalancing) ----
+    st.markdown("---")
+    render_rebalancing_panel(DB_PATH, estimate_classes_begin_from_srcdb)
 
     # ---- CoreEd daily section ----
     st.markdown("---")
