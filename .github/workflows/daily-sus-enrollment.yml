@@ -32,16 +32,30 @@ jobs:
         run: |
           python scripts/osu_enrollment_snapshot_classes_api_coreed.py
 
-      - name: Commit and push updated DB if it changed
+      - name: Update registration calendar from the registrar
+        # Adds each term's priority-registration waves to data/registration_calendar.csv
+        # once the registrar posts them. Never allowed to stop the snapshot being saved.
+        continue-on-error: true
         run: |
-          # Only bother if the DB actually changed
-          if git status --porcelain data/osu_enrollment_log_classes.db | grep -q .; then
-            echo "Database changed; committing update."
+          python scripts/update_registration_calendar.py
+
+      - name: Save today's forecast
+        # Archives the dashboard's projected-final-enrolment table to forecasts/<term>/<date>.csv
+        continue-on-error: true
+        run: |
+          python scripts/save_forecast.py
+
+      - name: Commit and push updated data if anything changed
+        run: |
+          git add data/osu_enrollment_log_classes.db data/registration_calendar.csv
+          if [ -d forecasts ]; then git add forecasts; fi
+          if git diff --cached --quiet; then
+            echo "Nothing changed; nothing to commit."
+          else
+            echo "Changes:"
+            git diff --cached --stat
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add data/osu_enrollment_log_classes.db
             git commit -m "Daily enrollment snapshot $(date -u +'%Y-%m-%d')"
             git push
-          else
-            echo "No changes to data/osu_enrollment_log_classes.db; nothing to commit."
           fi

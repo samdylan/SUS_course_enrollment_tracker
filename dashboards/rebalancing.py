@@ -68,6 +68,11 @@ SMALL_COURSE_CAP = 30
 SNAPSHOT_HOUR_PT = 9          # nightly Action runs 17:00 UTC
 SETTLE_DAYS = 3               # days after the last relevant wave before a read is "firm"
 PT = "America/Los_Angeles"
+METHOD_VERSION = "2026-11-23 waves-v1"
+STATUS_ORDER = {"Full now": 0, "Likely to fill": 1, "On track": 2, "Likely slack": 3,
+                "No basis": 4, "No registrations yet": 5}
+STATUS_FILL = {"Full now": "#f1b0b7", "Likely to fill": "#f8d7da", "On track": "#d4edda",
+               "Likely slack": "#d1ecf1", "No basis": "#eeeeee", "No registrations yet": "#eeeeee"}
 
 
 def term_short(t: str) -> str:
@@ -405,11 +410,28 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
         ))
     out = pd.DataFrame(rows)
     if not out.empty:
-        out = out.sort_values("Gap", ascending=False, na_position="last").reset_index(drop=True)
+        out["_o"] = out.Status.map(STATUS_ORDER).fillna(9)
+        out = (out.sort_values(["_o", "Gap"], ascending=[True, False], na_position="last")
+                  .drop(columns="_o").reset_index(drop=True))
     meta = dict(term=term, season=season, d_now=d_now, open_day=open_t, k_now=k_now,
                 as_of=as_of_ts.date(), as_of_ts=as_of_ts, now_pt=now_pt, waves=ws,
                 refs=[term_short(r) for r, *_ in refs])
     return out, meta
+
+
+def forecast_records(tbl: pd.DataFrame, meta: dict) -> pd.DataFrame:
+    """The projection table plus the context needed to read it later: which data it was
+    built from, which waves were in, which reference terms and method version."""
+    out = tbl.copy()
+    out.insert(0, "term_srcdb", meta["term"])
+    out.insert(1, "data_as_of", str(meta["as_of"]))
+    out.insert(2, "day", meta["d_now"])
+    ws = meta.get("waves")
+    out["waves_in_data"] = ("" if ws is None else
+                            ", ".join(ws[ws.state == "in data"].wave))
+    out["reference_terms"] = ", ".join(meta["refs"])
+    out["method_version"] = METHOD_VERSION
+    return out
 
 
 # ---------------------------------------------------------------- rendering
@@ -482,7 +504,7 @@ def render_rebalancing_panel(db_path, classes_begin):
         tbl = tbl[tbl.Capacity.isna() | (tbl.Capacity >= SMALL_COURSE_CAP)]
     st.caption(f"Data as of {meta['as_of']} (snapshot ~09:00 Pacific) · day {meta['d_now']} · "
                f"reference terms: {', '.join(meta['refs']) or 'none'}. "
-               "Grey rows are provisional: some of the students who take that course "
+               "Grey numbers are provisional: some of the students who take that course "
                "have not been able to register yet.")
 
     show = tbl.copy()
@@ -497,22 +519,20 @@ def render_rebalancing_panel(db_path, classes_begin):
             "Status", "Read", "Waiting on", "Last same-season final", "Ref sold out", "Basis"]
     show = show[cols]
 
-    status_bg = {"Likely to fill": "#f8d7da", "Full now": "#f8d7da", "Likely slack": "#d1ecf1"}
-
     def _row_style(row):
         styles = [""] * len(row)
         provisional = row["Read"] == "waiting"
         for i, c in enumerate(row.index):
-            if provisional and c in ("Projected", "Range", "Gap", "Status", "Read"):
+            if c == "Status" and row["Status"] in STATUS_FILL:
+                styles[i] = f"background-color: {STATUS_FILL[row['Status']]}"
+            elif provisional and c in ("Projected", "Range", "Gap", "Read"):
                 styles[i] = "color: #9a9a9a"
-            if c == "Status" and not provisional and row["Status"] in status_bg:
-                styles[i] = f"background-color: {status_bg[row['Status']]}"
-            if c == "Waiting on":
+            elif c == "Waiting on":
                 if row["Waiting on"] == "all in":
-                    styles[i] = "background-color: #d4edda; color: #155724"
+                    styles[i] = "color: #155724"
                 elif row["Waiting on"]:
-                    styles[i] = "background-color: #f8d7da; color: #721c24"
-            if c == "Read" and row["Read"] == "firm":
+                    styles[i] = "color: #a71d2a"
+            elif c == "Read" and row["Read"] == "firm":
                 styles[i] = "color: #155724; font-weight: 600"
         return styles
 
@@ -528,7 +548,8 @@ def render_rebalancing_panel(db_path, classes_begin):
             "the class-standing waves for every course, plus the week-10 release for Ecampus sections, "
             "before which Corvallis students cannot register for them. **Read** is *waiting* until those "
             f"are in, *settling* for {SETTLE_DAYS} days after the last one, then *firm*.\n"
-            "- **Gap** = projected minus capacity; rows run from tightest to slackest. A positive gap means "
+            "- Rows are ordered by status (full now, likely to fill, on track, likely slack), then by gap.\n"
+            "- **Gap** = projected minus capacity. A positive gap means "
             "the course will likely fill. It does not measure unmet demand: early in the ramp the multiplier "
             "overstates it, and when the reference term sold out it understates it. **Last same-season final** "
             "is the better guide to how many students a course actually served.\n"
