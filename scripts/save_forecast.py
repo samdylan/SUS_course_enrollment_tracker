@@ -25,12 +25,13 @@ def main() -> int:
     E = rb.load_events(db)
     manual = rb.load_manual_capacity(db)
     cal = rb.load_calendar(db)
+    obs = rb.load_error_obs(db)
     terms = sorted(E[(E.src == "live") & (E.enrolled > 0)].term_srcdb.unique(), key=int)
     wrote = 0
     for t in terms:
         if dash.estimate_classes_begin_from_srcdb(t) is None:
             continue
-        tbl, meta = rb.build_projection(E, t, dash.estimate_classes_begin_from_srcdb, manual, cal)
+        tbl, meta = rb.build_projection(E, t, dash.estimate_classes_begin_from_srcdb, manual, cal, obs=obs)
         if tbl.empty or meta["d_now"] >= 0:      # only terms that have not started
             continue
         out = ROOT / "forecasts" / t / f"{meta['as_of']}.csv"

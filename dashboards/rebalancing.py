@@ -68,7 +68,11 @@ SMALL_COURSE_CAP = 30
 SNAPSHOT_HOUR_PT = 9          # nightly Action runs 17:00 UTC
 SETTLE_DAYS = 3               # days after the last relevant wave before a read is "firm"
 PT = "America/Los_Angeles"
-METHOD_VERSION = "2026-11-23 waves-v1"
+METHOD_VERSION = "2026-11-24 waves-v1+confidence"
+CONF_THRESHOLDS = (0.10, 0.25)  # 80th-percentile error: <=10% High, <=25% Medium, else Low
+CAL_MIN_OBS = 20                # a calibration group needs this many past forecasts...
+CAL_MIN_SERIES = 3              # ...covering at least this many course-terms
+CAL_MIN_TERMS = 2               # ...from at least this many terms
 STATUS_ORDER = {"Full now": 0, "Likely to fill": 1, "On track": 2, "Likely slack": 3,
                 "No basis": 4, "No registrations yet": 5}
 # Coloured for seat efficiency, the program's goal: full is good, slack is the problem.
@@ -248,6 +252,72 @@ def _align_on_waves(cal_t, cal_r, mode, as_of_ts, target_start, ref_start):
     return d_ref, label
 
 
+# ---------------------------------------------------------------- confidence
+
+def stage_of(read: str) -> str:
+    """Collapse the Read labels into calibration stages."""
+    if read in ("final", "firm", "settling"):
+        return read
+    return "provisional"          # waiting, early, unreliable
+
+
+def days_bucket(d: int) -> str:
+    if d <= -61:
+        return ">60 days"
+    if d <= -31:
+        return "31-60 days"
+    if d <= -16:
+        return "16-30 days"
+    return "1-15 days"
+
+
+def load_error_obs(db_path: Path) -> pd.DataFrame:
+    """Past forecasts scored against what happened (data/forecast_errors.csv)."""
+    p = Path(db_path).parent / "forecast_errors.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    o = pd.read_csv(p, dtype={"term_srcdb": str})
+    if o.empty:
+        return o
+    # where a real archived forecast exists, it replaces the back-test replay of the same day
+    o["_k"] = o.term_srcdb + "|" + o.data_as_of.astype(str) + "|" + o.course + "|" + o["mode"]
+    o = (o.assign(_a=(o.source == "archive").astype(int)).sort_values("_a", ascending=False)
+          .drop_duplicates("_k").drop(columns=["_k", "_a"]))
+    o["bucket"] = o.day.astype(int).map(days_bucket)
+    o["fill"] = np.where(o.expected >= FULL_FILL * o.capacity_at_forecast, "projected full", "seats left")
+    o["signed"] = o.final / o.expected - 1
+    o["series"] = o.term_srcdb + "|" + o.course + "|" + o["mode"]
+    return o
+
+
+_CAL_LEVELS = [("season", "mode", "stage", "fill", "bucket"), ("season", "mode", "stage", "fill"),
+               ("mode", "stage", "fill", "bucket"), ("mode", "stage", "fill"),
+               ("mode", "stage"), ("stage",), ()]
+
+
+def confidence_for(obs, season, mode, stage, d, full):
+    """How wrong have past forecasts made in the same situation been? Uses the most
+    specific group (season, modality, stage, projected full or not, lead time) with
+    enough history, widening step by step otherwise. Returns None without history."""
+    if obs is None or obs.empty:
+        return None
+    vals = dict(season=season, mode=mode, stage=stage, bucket=days_bucket(d),
+                fill="projected full" if full else "seats left")
+    for lv in _CAL_LEVELS:
+        sel = obs
+        for k in lv:
+            sel = sel[sel[k] == vals[k]]
+        if (len(sel) >= CAL_MIN_OBS and sel.series.nunique() >= CAL_MIN_SERIES
+                and sel.term_srcdb.nunique() >= CAL_MIN_TERMS):
+            p80 = float(sel.abs_pct_error.quantile(0.8))
+            label = ("High" if p80 <= CONF_THRESHOLDS[0]
+                     else "Medium" if p80 <= CONF_THRESHOLDS[1] else "Low")
+            cell = " · ".join(vals[k] for k in lv) if lv else "all past forecasts"
+            return dict(p80=p80, label=label, n=len(sel), terms=sel.term_srcdb.nunique(), cell=cell,
+                        q10=float(sel.signed.quantile(0.1)), q90=float(sel.signed.quantile(0.9)))
+    return None
+
+
 # ---------------------------------------------------------------- grids
 
 def _grid(E: pd.DataFrame, term: str, start: pd.Timestamp):
@@ -287,7 +357,7 @@ def _cap_sum(cap, day, cols, term, manual):
 # ---------------------------------------------------------------- projection
 
 def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timestamp]],
-                     manual=None, cal=None, now_pt=None):
+                     manual=None, cal=None, now_pt=None, obs=None):
     manual = manual or {}
     cal = cal if cal is not None else pd.DataFrame(columns=["term_srcdb"])
     now_pt = now_pt or now_pacific()
@@ -396,11 +466,33 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
         else:
             read = read_strength_fallback(season, mode, d_now, k_now)
 
+        # expected final enrolment cannot exceed seats; widen by past error in this situation
+        expected = (min(proj, cap_now) if not (np.isnan(proj) or np.isnan(cap_now)) else proj)
+        conf = (None if (d_now >= 0 or np.isnan(expected))
+                else confidence_for(obs, season, mode, stage_of(read), d_now,
+                                    (not np.isnan(cap_now)) and expected >= FULL_FILL * cap_now))
+        if d_now >= 0:
+            lik_lo = lik_hi = expected
+            conf_txt, conf_cell = "final", ""
+        elif conf is None or np.isnan(expected):
+            lik_lo = lik_hi = np.nan
+            conf_txt, conf_cell = ("no history" if not np.isnan(expected) else ""), ""
+        else:
+            # past errors are often lopsided (early Ecampus forecasts tend to come in low),
+            # so the range runs from the 10th to the 90th percentile of signed past error
+            lik_lo = expected * (1 + min(conf["q10"], 0))
+            lik_hi = expected * (1 + max(conf["q90"], 0))
+            if not np.isnan(cap_now):
+                lik_hi = min(lik_hi, cap_now)
+            conf_txt = f"{conf['label']} (±{conf['p80']:.0%})"
+            conf_cell = f"{conf['cell']} · {conf['n']} past forecasts, {conf['terms']} term(s)"
         rows.append(dict(
             Course=code, Mode=mode,
             Now=f"{now:.0f}/{cap_now:.0f}" if not np.isnan(cap_now) else f"{now:.0f}",
             FillNow=fill_now, Projected=proj, Low=lo, High=hi, Capacity=cap_now,
             Gap=(proj - cap_now) if not (np.isnan(proj) or np.isnan(cap_now)) else np.nan,
+            Expected=expected, LikelyLow=lik_lo, LikelyHigh=lik_hi,
+            Confidence=conf_txt, ConfidenceBasis=conf_cell,
             Status=status, Read=read,
             WaitingOn=("" if waiting is None else (waiting or "all in")),
             LastFinal=(f"{last_final[1]:.0f}/{last_final[2]:.0f} ({term_short(last_final[0])})"
@@ -476,6 +568,7 @@ def render_rebalancing_panel(db_path, classes_begin):
     E = load_events(db_path)
     manual = load_manual_capacity(db_path)
     cal = load_calendar(db_path)
+    obs = load_error_obs(db_path)
     terms = sorted(E[(E.src == "live") & (E.enrolled > 0)].term_srcdb.unique(), key=int, reverse=True)
     if not terms:
         st.info("No live registration data yet.")
@@ -487,7 +580,7 @@ def render_rebalancing_panel(db_path, classes_begin):
     with c2:
         show_small = st.checkbox(f"Include courses under {SMALL_COURSE_CAP} seats", value=False,
                                  key="rebal_small")
-    tbl, meta = build_projection(E, term, classes_begin, manual, cal)
+    tbl, meta = build_projection(E, term, classes_begin, manual, cal, obs=obs)
     if tbl.empty:
         st.info("No sections to project for this term.")
         return
@@ -511,13 +604,15 @@ def render_rebalancing_panel(db_path, classes_begin):
     show = tbl.copy()
     show["Fill now"] = show.FillNow.map(lambda x: "" if pd.isna(x) else f"{x:.0%}")
     show["Projected"] = show.Projected.map(lambda x: "" if pd.isna(x) else f"{x:.0f}")
-    show["Range"] = [("" if pd.isna(lo) else f"{lo:.0f}-{hi:.0f}") for lo, hi in zip(show.Low, show.High)]
+    show["Likely final"] = [("" if pd.isna(lo) else (f"{lo:.0f}" if round(lo) == round(hi) else f"{lo:.0f}-{hi:.0f}"))
+                            for lo, hi in zip(show.LikelyLow, show.LikelyHigh)]
     show["Capacity"] = show.Capacity.map(lambda x: "" if pd.isna(x) else f"{x:.0f}")
     show["Gap"] = show.Gap.map(lambda x: "" if pd.isna(x) else f"{x:+.0f}")
     show = show.rename(columns={"WaitingOn": "Waiting on", "LastFinal": "Last same-season final",
-                                "Floor": "Ref sold out"})
-    cols = ["Course", "Mode", "Now", "Fill now", "Projected", "Range", "Capacity", "Gap",
-            "Status", "Read", "Waiting on", "Last same-season final", "Ref sold out", "Basis"]
+                                "Floor": "Ref sold out", "ConfidenceBasis": "Confidence based on"})
+    cols = ["Course", "Mode", "Now", "Fill now", "Likely final", "Confidence", "Capacity", "Projected",
+            "Gap", "Status", "Read", "Waiting on", "Last same-season final", "Ref sold out", "Basis",
+            "Confidence based on"]
     show = show[cols]
 
     def _row_style(row):
@@ -533,6 +628,10 @@ def render_rebalancing_panel(db_path, classes_begin):
                     styles[i] = "color: #155724"
                 elif row["Waiting on"]:
                     styles[i] = "color: #a71d2a"
+            elif c == "Confidence":
+                lab = str(row["Confidence"]).split(" ")[0]
+                styles[i] = {"High": "color: #155724; font-weight: 600", "Medium": "color: #856404",
+                             "Low": "color: #a71d2a"}.get(lab, "color: #9a9a9a")
             elif c == "Read" and row["Read"] == "firm":
                 styles[i] = "color: #155724; font-weight: 600"
         return styles
@@ -541,6 +640,18 @@ def render_rebalancing_panel(db_path, classes_begin):
 
     with st.expander("How the projection works"):
         st.markdown(
+            "- **Likely final** is the expected final enrolment (the projection, capped at the seats "
+            "available) widened by how wrong past forecasts made in the same situation have been: same "
+            "season, modality, registration stage (provisional, settling, firm), whether the course is "
+            "projected to fill, and lead time. The range runs from the 10th to the 90th percentile of "
+            "those past errors, so it can be lopsided. With only a few past terms it is a little "
+            "optimistic: tested on terms it was not calibrated on, about 3 in 4 finals landed inside it.\n"
+            "- **Confidence** labels the typical size of that error (80% of past forecasts fell within "
+            "the ± shown): High within 10%, Medium within 25%, Low beyond. Where a "
+            "group has too little history it widens to a broader one; **Confidence based on** says which, "
+            "and how many past forecasts it rests on. The record (`data/forecast_errors.csv`) starts from a "
+            "replay of the panel over past terms, and the nightly job adds every archived forecast once its "
+            "term begins, so confidence recalibrates itself each term.\n"
             "- **Projected** = today's count x (reference term's final / its count at the same point), "
             "averaged over prior terms of the same season. **Range** is the spread across those terms.\n"
             "- **Same point** is measured from the most recent registration wave both terms have on file "

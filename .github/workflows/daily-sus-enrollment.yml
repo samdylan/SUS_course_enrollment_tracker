@@ -39,6 +39,13 @@ jobs:
         run: |
           python scripts/update_registration_calendar.py
 
+      - name: Score past forecasts
+        # Once a term has begun, compares its archived daily forecasts with actual day-0
+        # enrolment and adds them to data/forecast_errors.csv (feeds the Confidence column)
+        continue-on-error: true
+        run: |
+          python scripts/update_forecast_errors.py
+
       - name: Save today's forecast
         # Archives the dashboard's projected-final-enrolment table to forecasts/<term>/<date>.csv
         continue-on-error: true
@@ -49,6 +56,7 @@ jobs:
         run: |
           git add data/osu_enrollment_log_classes.db data/registration_calendar.csv
           if [ -d forecasts ]; then git add forecasts; fi
+          if [ -f data/forecast_errors.csv ]; then git add data/forecast_errors.csv; fi
           if git diff --cached --quiet; then
             echo "Nothing changed; nothing to commit."
           else
