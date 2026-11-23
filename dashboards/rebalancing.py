@@ -17,11 +17,20 @@ projected from today's count using prior terms of the same season:
 
 averaged across reference terms; the min..max across references is the range.
 
-"Same point" means days since registration opened, where that is known.
-Opening dates move by several days year to year, and early in the ramp a
-few days' misalignment swamps everything. A reference term whose logging
-began after registration had already opened has no known opening date, so
-it is aligned on days before term start instead, and labelled as such.
+"Same point" is defined by OSU's registration waves where they are on file
+(data/registration_calendar.csv): seniors, juniors, sophomores and freshmen
+open on different days, and Corvallis students cannot register for Ecampus
+sections until Monday of week 10. Reference terms are compared at the same
+time after the most recent wave that both terms have on record. Without a
+calendar, alignment falls back to days since registration opened, or days
+before term start.
+
+Who has been able to register
+-----------------------------
+Until a wave opens, its students are missing from the counts, so projections
+made before the sophomore and freshman waves (or, for Ecampus sections, before
+week 10) are extrapolating from the wrong students. Each row therefore shows
+which waves it is still waiting on, and such rows are marked provisional.
 
 Data handling
 -------------
@@ -30,18 +39,19 @@ Data handling
   010-399 are treated as labs.
 - The legacy table (sus_daily_registrations_2025) is an event log with one
   row per registration change, so each section is forward-filled onto a
-  daily grid before summing. Summing only the sections that happened to
-  transact on a given day produces nonsense.
+  daily grid before summing.
 - A reference term that sold out (final >= 95% of capacity) shows how many
-  students its seats held, not how many wanted in, so a projection leaning
-  on it understates demand. Such rows are flagged.
+  students its seats held, not how many wanted in. Such rows are flagged.
 - Capacity for terms the tracker did not record can be supplied in
   data/manual_capacity.csv (term_srcdb, code, section, capacity).
+- Snapshots are taken by the nightly GitHub Action at 17:00 UTC, i.e. about
+  09:00 Pacific; a snapshot dated D reflects registrations up to that time.
 - Cascades and other non-SUS-managed sections are excluded.
 """
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -49,24 +59,34 @@ import numpy as np
 import pandas as pd
 
 LAB_TYPES = {"D", "C1", "C2", "R"}
-OPEN_THRESHOLD = 20          # registration treated as open once the term's SUS lecture total exceeds this
+OPEN_THRESHOLD = 20
 SEASON = {"00": "Summer", "01": "Fall", "02": "Winter", "03": "Spring"}
 MODES = ("On-campus", "Ecampus")
-SLACK_FILL = 0.75            # projected fill at or below this is flagged as slack
-FULL_FILL = 0.95             # at or above this counts as full / sold out
-SMALL_COURSE_CAP = 30        # rows below this capacity are hidden by default
+SLACK_FILL = 0.75
+FULL_FILL = 0.95
+SMALL_COURSE_CAP = 30
+SNAPSHOT_HOUR_PT = 9          # nightly Action runs 17:00 UTC
+SETTLE_DAYS = 3               # days after the last relevant wave before a read is "firm"
+PT = "America/Los_Angeles"
 
 
 def term_short(t: str) -> str:
-    """202702 -> 'WI27'."""
     t = str(t)
     code = t[-2:]
     yr = int(t[:4]) - 1 if code in ("00", "01") else int(t[:4])
     return f"{SEASON.get(code, code)[:2].upper()}{str(yr)[-2:]}"
 
 
-def read_strength(season: str, mode: str, d: int, k: Optional[int]) -> str:
-    """Rule of thumb, from 2024-26 data, for when a read can be trusted."""
+def now_pacific() -> pd.Timestamp:
+    try:
+        from zoneinfo import ZoneInfo
+        return pd.Timestamp(datetime.now(ZoneInfo(PT)).replace(tzinfo=None))
+    except Exception:
+        return pd.Timestamp(datetime.utcnow()) - pd.Timedelta(hours=8)
+
+
+def read_strength_fallback(season: str, mode: str, d: int, k: Optional[int]) -> str:
+    """Rule of thumb for terms with no registration calendar on file."""
     if season == "Fall":
         return "firm" if d >= (-60 if mode == "On-campus" else -45) else "early"
     if season == "Winter":
@@ -77,6 +97,8 @@ def read_strength(season: str, mode: str, d: int, k: Optional[int]) -> str:
         return "firm" if d >= -15 else "early"
     return "unreliable"
 
+
+# ---------------------------------------------------------------- data
 
 def _mode(section) -> str:
     try:
@@ -126,7 +148,6 @@ def load_events(db_path: Path) -> pd.DataFrame:
     E["ts"] = pd.to_datetime(E.snapshot_date, format="mixed", errors="coerce")
     E = E.dropna(subset=["ts"])
     E["day"] = E.ts.dt.normalize()
-    # Prefer the live tracker for any term where it has a real trajectory.
     live_days = E[E.src == "live"].groupby("term_srcdb").day.nunique()
     live_terms = set(live_days[live_days > 5].index)
     E = E[~((E.src == "legacy") & E.term_srcdb.isin(live_terms))]
@@ -144,6 +165,85 @@ def load_manual_capacity(db_path: Path) -> dict:
             for r in m.itertuples()}
 
 
+def load_calendar(db_path: Path) -> pd.DataFrame:
+    p = Path(db_path).parent / "registration_calendar.csv"
+    cols = ["term_srcdb", "order", "wave", "opens", "scope", "key", "source"]
+    if not p.exists():
+        return pd.DataFrame(columns=cols)
+    c = pd.read_csv(p, dtype=str)
+    c["term_srcdb"] = c.term_srcdb.str.strip()
+    c["opens"] = pd.to_datetime(c.opens.str.strip())
+    c["order"] = c.order.astype(int)
+    c["scope"] = c.scope.str.strip().str.lower()
+    c["key"] = c.key.str.strip().str.lower().eq("yes")
+    return c.sort_values(["term_srcdb", "order"]).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------- waves
+
+def wave_states(cal_t: pd.DataFrame, as_of_ts: pd.Timestamp, now_pt: pd.Timestamp) -> pd.DataFrame:
+    """Each wave's state relative to the data snapshot and to today."""
+    out = cal_t.copy()
+    states = []
+    for r in out.itertuples():
+        covered = as_of_ts - r.opens
+        if covered >= pd.Timedelta(hours=24):
+            states.append("in data")
+        elif r.opens <= as_of_ts:
+            states.append("partly in data")
+        elif r.opens <= now_pt:
+            states.append("not in your data yet")
+        else:
+            states.append("upcoming")
+    out["state"] = states
+    return out
+
+
+def _relevant(ws: pd.DataFrame, mode: str) -> pd.DataFrame:
+    """Key waves that govern a row: standing waves for everyone, plus the Ecampus release for Ecampus rows."""
+    w = ws[ws.key]
+    if mode != "Ecampus":
+        w = w[w.scope != "ecampus"]
+    return w
+
+
+def _align_on_waves(cal_t, cal_r, mode, as_of_ts, target_start, ref_start):
+    """Day in the reference term equivalent to as_of_ts in the target term.
+
+    1. Anchor on the most recent relevant wave both terms have on file and take the
+       same elapsed time after it; with no shared wave, use the same days before term.
+    2. Never let the reference point fall after a wave that has not yet opened in the
+       target: compare like with like, the same groups of students registered.
+
+    Returns (d_ref, label), or None when either term has no calendar."""
+    if cal_t is None or cal_r is None or cal_t.empty or cal_r.empty:
+        return None
+    rel_t = _relevant(cal_t.assign(state=""), mode)
+    opened = rel_t[rel_t.opens <= as_of_ts]
+    shared = opened[opened.wave.isin(set(cal_r.wave))]
+    short = lambda w: {"Ecampus open to Corvallis students": "Ecampus release"}.get(w, w)
+    if not shared.empty:
+        w = shared.sort_values("opens").iloc[-1]
+        dt = as_of_ts - w.opens
+        ref_ts = cal_r[cal_r.wave == w.wave].opens.iloc[0] + dt
+        label = f"{short(w.wave)}+{dt.days}d"
+    else:
+        ref_ts = ref_start + (as_of_ts - target_start)
+        label = f"d{(as_of_ts.normalize() - target_start).days}"
+    pending = rel_t[rel_t.opens > as_of_ts]
+    caps = cal_r[cal_r.wave.isin(set(pending.wave))]
+    if not caps.empty:
+        c = caps.sort_values("opens").iloc[0]
+        cap_ts = c.opens - pd.Timedelta(minutes=1)
+        if ref_ts > cap_ts:
+            ref_ts = cap_ts
+            label += f", held before {short(c.wave)}"
+    d_ref = int(np.floor((ref_ts - (ref_start + pd.Timedelta(hours=SNAPSHOT_HOUR_PT))) / pd.Timedelta(days=1)))
+    return d_ref, label
+
+
+# ---------------------------------------------------------------- grids
+
 def _grid(E: pd.DataFrame, term: str, start: pd.Timestamp):
     g = E[E.term_srcdb == term].sort_values("ts")
     if g.empty:
@@ -160,7 +260,6 @@ def _grid(E: pd.DataFrame, term: str, start: pd.Timestamp):
 
 
 def _opening(enr: pd.DataFrame) -> Optional[int]:
-    """First day the total exceeds the threshold; None if logging began after opening."""
     tot = enr.sum(axis=1, min_count=1).fillna(0)
     if tot.empty or tot.iloc[0] > OPEN_THRESHOLD:
         return None
@@ -179,8 +278,13 @@ def _cap_sum(cap, day, cols, term, manual):
     return float(sum(vals)) if len(vals) == len(cols) and vals else np.nan
 
 
-def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timestamp]], manual=None):
+# ---------------------------------------------------------------- projection
+
+def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timestamp]],
+                     manual=None, cal=None, now_pt=None):
     manual = manual or {}
+    cal = cal if cal is not None else pd.DataFrame(columns=["term_srcdb"])
+    now_pt = now_pt or now_pacific()
     term = str(term)
     start = classes_begin(term)
     enr, cap = _grid(E, term, start)
@@ -188,10 +292,12 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
         return pd.DataFrame(), {}
     season = SEASON.get(term[-2:], "?")
     d_now = int(min(enr.index.max(), 0))
+    as_of_ts = start + pd.Timedelta(days=d_now, hours=SNAPSHOT_HOUR_PT)
     open_t = _opening(enr)
     k_now = (d_now - open_t) if open_t is not None else None
+    cal_t = cal[cal.term_srcdb == term] if not cal.empty else None
+    ws = wave_states(cal_t, as_of_ts, now_pt) if cal_t is not None and not cal_t.empty else None
 
-    # reference terms: same season, earlier, with a day-0 observation
     refs = []
     for r in sorted(E.term_srcdb.unique(), key=int, reverse=True):
         if r[-2:] != term[-2:] or int(r) >= int(term):
@@ -202,20 +308,32 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
         re_, rc_ = _grid(E, r, rs)
         if re_ is None or 0 not in re_.index:
             continue
-        refs.append((r, re_, rc_, _opening(re_)))
+        cal_r = cal[cal.term_srcdb == r] if not cal.empty else None
+        refs.append((r, rs, re_, rc_, _opening(re_), cal_r))
 
     keymode = E.drop_duplicates("key").set_index("key")["mode"]
     keycode = E.drop_duplicates("key").set_index("key")["code"]
+    pairs = sorted({(keycode.get(c), keymode.get(c)) for c in enr.columns})
     rows = []
-    for (code, mode), _ in pd.Series(1, index=pd.MultiIndex.from_arrays(
-            [keycode.reindex(enr.columns).values, keymode.reindex(enr.columns).values])).groupby(level=[0, 1]):
+    for code, mode in pairs:
         if mode not in MODES:
             continue
         cols = [c for c in enr.columns if keycode.get(c) == code and keymode.get(c) == mode]
         now = float(enr.loc[d_now, cols].sum())
         cap_now = _cap_sum(cap, d_now, cols, term, manual)
+
+        # who has been able to register
+        if ws is not None:
+            rel = _relevant(ws, mode)
+            pending = rel[rel.state != "in data"]
+            waiting = ", ".join({"Ecampus open to Corvallis students": "Ecampus release"}.get(w, w)
+                                for w in pending.wave)
+            last_rel = rel[rel.state == "in data"].opens.max() if (rel.state == "in data").any() else None
+        else:
+            pending, waiting, last_rel = None, None, None
+
         projs, basis, sold_out, last_final = [], [], False, None
-        for r, re_, rc_, open_r in refs:
+        for r, rs, re_, rc_, open_r, cal_r in refs:
             rcols = [c for c in re_.columns if keycode.get(c) == code and keymode.get(c) == mode]
             if not rcols:
                 continue
@@ -223,10 +341,14 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
             rcap = _cap_sum(rc_, 0, rcols, r, manual)
             if last_final is None:
                 last_final = (r, fin, rcap)
-            if open_r is not None and k_now is not None:
+            aligned = _align_on_waves(cal_t, cal_r, mode, as_of_ts, start, rs)
+            if aligned is not None:
+                d_ref, clock = aligned
+            elif open_r is not None and k_now is not None:
                 d_ref, clock = open_r + k_now, f"open+{k_now}"
             else:
                 d_ref, clock = d_now, f"d{d_now}"
+            d_ref = min(d_ref, 0)
             if d_ref not in re_.index:
                 continue
             at = float(re_.loc[d_ref, rcols].sum())
@@ -237,6 +359,7 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
             sold_out |= capped
             projs.append(now * ratio)
             basis.append(f"{term_short(r)} {clock} x{ratio:.2f}" + (" (sold out)" if capped else ""))
+
         if d_now >= 0:
             proj, lo, hi = now, now, now
         elif projs and now > 0:
@@ -254,15 +377,26 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
             status = "Likely slack"
         else:
             status = "On track"
+
+        if d_now >= 0:
+            read = "final"
+        elif ws is not None:
+            if waiting:
+                read = "waiting"
+            elif last_rel is not None and (as_of_ts - last_rel) >= pd.Timedelta(days=SETTLE_DAYS):
+                read = "firm"
+            else:
+                read = "settling"
+        else:
+            read = read_strength_fallback(season, mode, d_now, k_now)
+
         rows.append(dict(
             Course=code, Mode=mode,
             Now=f"{now:.0f}/{cap_now:.0f}" if not np.isnan(cap_now) else f"{now:.0f}",
-            FillNow=fill_now,
-            Projected=proj, Low=lo, High=hi,
-            Capacity=cap_now,
+            FillNow=fill_now, Projected=proj, Low=lo, High=hi, Capacity=cap_now,
             Gap=(proj - cap_now) if not (np.isnan(proj) or np.isnan(cap_now)) else np.nan,
-            Status=status,
-            Read="final" if d_now >= 0 else read_strength(season, mode, d_now, k_now),
+            Status=status, Read=read,
+            WaitingOn=("" if waiting is None else (waiting or "all in")),
             LastFinal=(f"{last_final[1]:.0f}/{last_final[2]:.0f} ({term_short(last_final[0])})"
                        if last_final and not np.isnan(last_final[2])
                        else (f"{last_final[1]:.0f} ({term_short(last_final[0])})" if last_final else "")),
@@ -273,17 +407,52 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
     if not out.empty:
         out = out.sort_values("Gap", ascending=False, na_position="last").reset_index(drop=True)
     meta = dict(term=term, season=season, d_now=d_now, open_day=open_t, k_now=k_now,
-                as_of=(start + pd.Timedelta(days=d_now)).date() if start is not None else None,
+                as_of=as_of_ts.date(), as_of_ts=as_of_ts, now_pt=now_pt, waves=ws,
                 refs=[term_short(r) for r, *_ in refs])
     return out, meta
+
+
+# ---------------------------------------------------------------- rendering
+
+_CHIP = {
+    "in data": ("#d4edda", "#155724", "&#10003;"),
+    "partly in data": ("#fff3cd", "#856404", "&#9680;"),
+    "not in your data yet": ("#fff3cd", "#856404", "&#9680;"),
+    "upcoming": ("#f8d7da", "#721c24", "&#9675;"),
+}
+
+
+def _wave_strip_html(ws: pd.DataFrame, now_pt: pd.Timestamp) -> str:
+    chips = []
+    for r in ws.itertuples():
+        bg, fg, sym = _CHIP[r.state]
+        name = {"Ecampus open to Corvallis students": "Ecampus to Corvallis students"}.get(r.wave, r.wave)
+        when = r.opens.strftime("%a %d %b")
+        if r.state == "upcoming":
+            days = (r.opens.normalize() - now_pt.normalize()).days
+            note = f"opens {when}" + (f", in {days} day{'s' if days != 1 else ''}" if days > 0 else ", today")
+        elif r.state == "in data":
+            note = f"opened {when}"
+        elif r.state == "partly in data":
+            note = f"opened {when}, under a day in your data"
+        else:
+            note = f"opened {when}, not in your data: git pull"
+        weight = "600" if r.key else "400"
+        chips.append(
+            f'<span style="display:inline-block;padding:4px 11px;margin:3px 6px 3px 0;border-radius:14px;'
+            f'background:{bg};color:{fg};font-size:0.85em;font-weight:{weight}">{sym} {name} '
+            f'<span style="font-weight:400;opacity:0.85">· {note}</span></span>')
+    return "".join(chips)
 
 
 def render_rebalancing_panel(db_path, classes_begin):
     import streamlit as st
     st.header("Projected final enrolment")
     st.caption("For in-term rebalancing: which courses are heading short of seats, and which will have slack.")
-    E = load_events(Path(db_path))
-    manual = load_manual_capacity(Path(db_path))
+    db_path = Path(db_path)
+    E = load_events(db_path)
+    manual = load_manual_capacity(db_path)
+    cal = load_calendar(db_path)
     terms = sorted(E[(E.src == "live") & (E.enrolled > 0)].term_srcdb.unique(), key=int, reverse=True)
     if not terms:
         st.info("No live registration data yet.")
@@ -295,51 +464,78 @@ def render_rebalancing_panel(db_path, classes_begin):
     with c2:
         show_small = st.checkbox(f"Include courses under {SMALL_COURSE_CAP} seats", value=False,
                                  key="rebal_small")
-    tbl, meta = build_projection(E, term, classes_begin, manual)
+    tbl, meta = build_projection(E, term, classes_begin, manual, cal)
     if tbl.empty:
         st.info("No sections to project for this term.")
         return
+
+    st.markdown("**Who has been able to register**")
+    if meta["waves"] is not None:
+        st.markdown(_wave_strip_html(meta["waves"], meta["now_pt"]), unsafe_allow_html=True)
+        st.caption("Green: in your data. Amber: opened, but not yet (fully) in the data you have; "
+                   "run `git pull`. Red: not open yet. Bold waves drive the forecast.")
+    else:
+        st.caption("No registration calendar on file for this term "
+                   "(add it to data/registration_calendar.csv).")
+
     if not show_small:
         tbl = tbl[tbl.Capacity.isna() | (tbl.Capacity >= SMALL_COURSE_CAP)]
-    opened = (f"registration opened day {meta['open_day']} ({meta['k_now']} days ago)"
-              if meta["open_day"] is not None else "registration opening date not observed")
-    st.caption(f"As of {meta['as_of']} · day {meta['d_now']} · {opened} · "
+    st.caption(f"Data as of {meta['as_of']} (snapshot ~09:00 Pacific) · day {meta['d_now']} · "
                f"reference terms: {', '.join(meta['refs']) or 'none'}. "
-               "Rows marked early are directional: they show which way a course is heading, "
-               "not by how much.")
+               "Grey rows are provisional: some of the students who take that course "
+               "have not been able to register yet.")
+
     show = tbl.copy()
     show["Fill now"] = show.FillNow.map(lambda x: "" if pd.isna(x) else f"{x:.0%}")
     show["Projected"] = show.Projected.map(lambda x: "" if pd.isna(x) else f"{x:.0f}")
     show["Range"] = [("" if pd.isna(lo) else f"{lo:.0f}-{hi:.0f}") for lo, hi in zip(show.Low, show.High)]
     show["Capacity"] = show.Capacity.map(lambda x: "" if pd.isna(x) else f"{x:.0f}")
     show["Gap"] = show.Gap.map(lambda x: "" if pd.isna(x) else f"{x:+.0f}")
-    show = show.rename(columns={"LastFinal": "Last same-season final", "Floor": "Ref sold out"})
-    show = show[["Course", "Mode", "Now", "Fill now", "Projected", "Range", "Capacity", "Gap",
-                 "Status", "Read", "Last same-season final", "Ref sold out", "Basis"]]
-    colors = {"Likely to fill": "#f8d7da", "Full now": "#f8d7da",
-              "Likely slack": "#d1ecf1", "On track": "", "No basis": "#eeeeee",
-              "No registrations yet": "#eeeeee"}
-    sty = show.style
-    sty = (sty.map if hasattr(sty, "map") else sty.applymap)(
-        lambda v: f"background-color: {colors.get(v, '')}" if v in colors and colors.get(v) else "",
-        subset=["Status"])
-    st.dataframe(sty, width="stretch", hide_index=True)
+    show = show.rename(columns={"WaitingOn": "Waiting on", "LastFinal": "Last same-season final",
+                                "Floor": "Ref sold out"})
+    cols = ["Course", "Mode", "Now", "Fill now", "Projected", "Range", "Capacity", "Gap",
+            "Status", "Read", "Waiting on", "Last same-season final", "Ref sold out", "Basis"]
+    show = show[cols]
+
+    status_bg = {"Likely to fill": "#f8d7da", "Full now": "#f8d7da", "Likely slack": "#d1ecf1"}
+
+    def _row_style(row):
+        styles = [""] * len(row)
+        provisional = row["Read"] == "waiting"
+        for i, c in enumerate(row.index):
+            if provisional and c in ("Projected", "Range", "Gap", "Status", "Read"):
+                styles[i] = "color: #9a9a9a"
+            if c == "Status" and not provisional and row["Status"] in status_bg:
+                styles[i] = f"background-color: {status_bg[row['Status']]}"
+            if c == "Waiting on":
+                if row["Waiting on"] == "all in":
+                    styles[i] = "background-color: #d4edda; color: #155724"
+                elif row["Waiting on"]:
+                    styles[i] = "background-color: #f8d7da; color: #721c24"
+            if c == "Read" and row["Read"] == "firm":
+                styles[i] = "color: #155724; font-weight: 600"
+        return styles
+
+    st.dataframe(show.style.apply(_row_style, axis=1), width="stretch", hide_index=True)
+
     with st.expander("How the projection works"):
         st.markdown(
             "- **Projected** = today's count x (reference term's final / its count at the same point), "
             "averaged over prior terms of the same season. **Range** is the spread across those terms.\n"
-            "- **Same point** is days since registration opened where known; otherwise days before term "
-            "start. The **Basis** column shows which, for each reference.\n"
+            "- **Same point** is measured from the most recent registration wave both terms have on file "
+            "(see **Basis**); otherwise days since registration opened, or days before term start.\n"
+            "- **Waiting on** lists the registration waves not yet in your data for that row's students: "
+            "the class-standing waves for every course, plus the week-10 release for Ecampus sections, "
+            "before which Corvallis students cannot register for them. **Read** is *waiting* until those "
+            f"are in, *settling* for {SETTLE_DAYS} days after the last one, then *firm*.\n"
             "- **Gap** = projected minus capacity; rows run from tightest to slackest. A positive gap means "
             "the course will likely fill. It does not measure unmet demand: early in the ramp the multiplier "
             "overstates it, and when the reference term sold out it understates it. **Last same-season final** "
             "is the better guide to how many students a course actually served.\n"
             f"- **Likely slack** means projected fill at or below {SLACK_FILL:.0%}.\n"
             "- **Ref sold out**: a reference term filled its seats, so it shows what the seats held, not "
-            "what students wanted. The projection is then a floor.\n"
-            "- **Read**: whether this point in the cycle has been reliable historically. Winter on-campus "
-            "settles about a week after registration opens; Winter Ecampus around day -30; Fall from "
-            "about day -60 (on-campus) and -45 (Ecampus); Spring only from about day -15.\n"
+            "what students wanted.\n"
             "- Lecture and primary sections only. Cascades excluded.\n"
-            "- Missing historical capacities can be added to `data/manual_capacity.csv`."
+            "- Registration waves: `data/registration_calendar.csv` (from the registrar's priority "
+            "registration page each term). Missing historical capacities: `data/manual_capacity.csv`."
         )

@@ -1,0 +1,14 @@
+term_srcdb,order,wave,opens,scope,key,source
+202702,1,Seniors,2026-11-16 20:00,all,yes,registrar priority-registration table
+202702,2,Juniors,2026-11-19 07:00,all,yes,registrar priority-registration table
+202702,3,Sophomores,2026-11-23 07:00,all,yes,registrar priority-registration table
+202702,4,Freshmen,2026-11-25 07:00,all,yes,registrar priority-registration table
+202702,5,Ecampus open to Corvallis students,2026-11-30 06:00,ecampus,yes,registrar priority-registration page (Week 10 rule)
+202702,6,Nondegree,2026-12-07 07:00,all,no,registrar priority-registration table
+202602,1,Seniors,2025-11-17 20:00,all,yes,registrar archive: priority registration opens Mon 17 Nov (hour assumed as in 2027)
+202602,5,Ecampus open to Corvallis students,2025-12-01 06:00,ecampus,yes,registrar student email (Week 10 rule); +48 Ecampus adds that day
+202502,1,Seniors,2024-11-18 06:00,all,yes,inferred from data: first registrations Mon 18 Nov (registrar: phase 1 from 17 Nov)
+202502,5,Ecampus open to Corvallis students,2024-12-02 06:00,ecampus,yes,inferred from data: Week 10 Monday; +22 Ecampus adds that day
+202602,3,Sophomores,2025-11-21 12:00,all,yes,inferred from data: on-campus surge (+222) between the 21 and 22 Nov snapshots; exact wave and hour unconfirmed
+202602,4,Freshmen,2025-11-24 07:00,all,yes,inferred from data: further surge (+72) by the 25 Nov snapshot (23-24 Nov not logged); assumed Monday
+202502,3,Sophomores,2024-11-24 00:00,all,yes,inferred from data: on-campus surge (+207) on 24 Nov in the legacy event log; exact wave unconfirmed
