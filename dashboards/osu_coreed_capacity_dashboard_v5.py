@@ -588,12 +588,31 @@ def build_category_aggregate_chart(
     campus_cat = pd.CategoricalDtype(CAMPUS_ORDER, ordered=True)
     agg["campus_group"] = agg["campus_group"].astype(campus_cat)
 
+    # Bold axis labels for currently-enrolling terms + their prior-year
+    # equivalents (same term code, one AY earlier).
+    bold_labels: list[str] = []
+    for t in active_terms:
+        bold_labels.append(term_label_map.get(t, t))
+        try:
+            prior_year_srcdb = str(int(t) - 100)
+            if prior_year_srcdb in term_label_map:
+                bold_labels.append(term_label_map[prior_year_srcdb])
+        except (ValueError, TypeError):
+            pass
+    bold_list_expr = "[" + ",".join(f"'{x}'" for x in bold_labels) + "]"
+    label_font_weight_expr = (
+        f"indexof({bold_list_expr}, datum.value) >= 0 ? 'bold' : 'normal'"
+    )
+
     # ✅ IMPORTANT: define ONE shared X encoding and reuse it in BOTH layers
     x_term = alt.X(
         "term_label:N",
         title="Term",
         sort=term_label_order,
-        axis=alt.Axis(labelAngle=-45),
+        axis=alt.Axis(
+            labelAngle=-45,
+            labelFontWeight={"expr": label_font_weight_expr},
+        ),
         scale=alt.Scale(domain=term_label_order),
     )
 
@@ -806,8 +825,9 @@ def main():
         st.session_state.pop("term_choice", None)
 
     term_codes = sorted(df_latest["term_srcdb"].dropna().unique().tolist(), reverse=True)
-    # Default to the 5 most recent terms; oldest drops off as new terms appear
-    default_terms = term_codes[:5]
+    # Default to the 6 most recent terms so the currently-enrolling term can be
+    # visually compared with the prior year equivalent (same term code, prior AY).
+    default_terms = term_codes[:6]
     term_choice = st.sidebar.multiselect(
         "Terms",
         options=term_codes,
