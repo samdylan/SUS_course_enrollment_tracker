@@ -71,8 +71,9 @@ PT = "America/Los_Angeles"
 METHOD_VERSION = "2026-11-23 waves-v1"
 STATUS_ORDER = {"Full now": 0, "Likely to fill": 1, "On track": 2, "Likely slack": 3,
                 "No basis": 4, "No registrations yet": 5}
-STATUS_FILL = {"Full now": "#f1b0b7", "Likely to fill": "#f8d7da", "On track": "#d4edda",
-               "Likely slack": "#d1ecf1", "No basis": "#eeeeee", "No registrations yet": "#eeeeee"}
+# Coloured for seat efficiency, the program's goal: full is good, slack is the problem.
+STATUS_FILL = {"Full now": "#9fd8a6", "Likely to fill": "#d4edda", "On track": "#fff3cd",
+               "Likely slack": "#f8d7da", "No basis": "#eeeeee", "No registrations yet": "#eeeeee"}
 
 
 def term_short(t: str) -> str:
