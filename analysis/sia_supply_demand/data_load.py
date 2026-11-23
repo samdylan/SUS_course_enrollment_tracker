@@ -55,7 +55,7 @@ TERM_META = {
     "202602": ("Winter", 2026, dt.date(2026, 1, 5)),
     "202603": ("Spring", 2026, dt.date(2026, 3, 30)),
     "202700": ("Summer", 2026, dt.date(2026, 6, 22)),
-    "202701": ("Fall",   2026, dt.date(2026, 9, 30)),
+    "202701": ("Fall",   2026, dt.date(2026, 9, 23)),   # registrar; was 9/30 from the old weekday heuristic
     "202702": ("Winter", 2027, dt.date(2027, 1, 4)),
 }
 
