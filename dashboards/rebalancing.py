@@ -68,7 +68,7 @@ SMALL_COURSE_CAP = 30
 SNAPSHOT_HOUR_PT = 9          # nightly Action runs 17:00 UTC
 SETTLE_DAYS = 3               # days after the last relevant wave before a read is "firm"
 PT = "America/Los_Angeles"
-METHOD_VERSION = "2026-11-24 waves-v1+confidence"
+METHOD_VERSION = "2026-11-27 waves-v1+confidence2"
 CONF_THRESHOLDS = (0.10, 0.25)  # 80th-percentile error: <=10% High, <=25% Medium, else Low
 CAL_MIN_OBS = 20                # a calibration group needs this many past forecasts...
 CAL_MIN_SERIES = 3              # ...covering at least this many course-terms
@@ -290,17 +290,43 @@ def load_error_obs(db_path: Path) -> pd.DataFrame:
     return o
 
 
+# Most specific first. Modality and whether the course is projected to fill matter most,
+# so they are kept longest; a thin stage borrows from its neighbour before anything is dropped.
 _CAL_LEVELS = [("season", "mode", "stage", "fill", "bucket"), ("season", "mode", "stage", "fill"),
-               ("mode", "stage", "fill", "bucket"), ("mode", "stage", "fill"),
-               ("mode", "stage"), ("stage",), ()]
+               ("mode", "stage", "fill", "bucket"), ("mode", "stage", "fill")]
+_CAL_BROAD = [("mode", "fill", "bucket"), ("mode", "fill"), ("mode",), ()]
+_STAGE_NEIGHBOUR = {"settling": "firm"}   # settling lasts only 3 days after a wave, so history is thin
 
 
 def confidence_for(obs, season, mode, stage, d, full):
     """How wrong have past forecasts made in the same situation been? Uses the most
     specific group (season, modality, stage, projected full or not, lead time) with
-    enough history, widening step by step otherwise. Returns None without history."""
+    enough history. If the stage is thin it borrows the neighbouring stage, then widens
+    step by step, keeping modality and full/not-full to the end. None without history."""
     if obs is None or obs.empty:
         return None
+    vals = dict(season=season, mode=mode, stage=stage, bucket=days_bucket(d),
+                fill="projected full" if full else "seats left")
+    tries = [(lv, stage) for lv in _CAL_LEVELS]
+    if stage in _STAGE_NEIGHBOUR:
+        tries += [(lv, _STAGE_NEIGHBOUR[stage]) for lv in _CAL_LEVELS]
+    tries += [(lv, stage) for lv in _CAL_BROAD]
+    for lv, st_ in tries:
+        v = dict(vals, stage=st_)
+        sel = obs
+        for k in lv:
+            sel = sel[sel[k] == v[k]]
+        if (len(sel) >= CAL_MIN_OBS and sel.series.nunique() >= CAL_MIN_SERIES
+                and sel.term_srcdb.nunique() >= CAL_MIN_TERMS):
+            p80 = float(sel.abs_pct_error.quantile(0.8))
+            label = ("High" if p80 <= CONF_THRESHOLDS[0]
+                     else "Medium" if p80 <= CONF_THRESHOLDS[1] else "Low")
+            cell = " · ".join(v[k] for k in lv) if lv else "all past forecasts"
+            if st_ != stage:
+                cell += f" (borrowed for {stage})"
+            return dict(p80=p80, label=label, n=len(sel), terms=sel.term_srcdb.nunique(), cell=cell,
+                        q10=float(sel.signed.quantile(0.1)), q90=float(sel.signed.quantile(0.9)))
+    return None
     vals = dict(season=season, mode=mode, stage=stage, bucket=days_bucket(d),
                 fill="projected full" if full else "seats left")
     for lv in _CAL_LEVELS:
@@ -447,7 +473,7 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
             status = "Full now"
         elif np.isnan(proj):
             status = "No basis" if now > 0 else "No registrations yet"
-        elif not np.isnan(cap_now) and proj >= cap_now:
+        elif not np.isnan(cap_now) and proj >= FULL_FILL * cap_now:   # 95% counts as full
             status = "Likely to fill"
         elif not np.isnan(cap_now) and proj <= SLACK_FILL * cap_now:
             status = "Likely slack"
@@ -648,12 +674,13 @@ def render_rebalancing_panel(db_path, classes_begin):
             "optimistic: tested on terms it was not calibrated on, about 3 in 4 finals landed inside it.\n"
             "- **Confidence** labels the typical size of that error (80% of past forecasts fell within "
             "the ± shown): High within 10%, Medium within 25%, Low beyond. Where a "
-            "group has too little history it widens to a broader one; **Confidence based on** says which, "
+            "group has too little history it first borrows the neighbouring stage (settling uses firm), "
+            "then widens, keeping modality and full/not-full to the end; **Confidence based on** says which, "
             "and how many past forecasts it rests on. The record (`data/forecast_errors.csv`) starts from a "
             "replay of the panel over past terms, and the nightly job adds every archived forecast once its "
             "term begins, so confidence recalibrates itself each term.\n"
             "- **Projected** = today's count x (reference term's final / its count at the same point), "
-            "averaged over prior terms of the same season. **Range** is the spread across those terms.\n"
+            "averaged over prior terms of the same season.\n"
             "- **Same point** is measured from the most recent registration wave both terms have on file "
             "(see **Basis**); otherwise days since registration opened, or days before term start.\n"
             "- **Waiting on** lists the registration waves not yet in your data for that row's students: "
@@ -665,7 +692,9 @@ def render_rebalancing_panel(db_path, classes_begin):
             "the course will likely fill. It does not measure unmet demand: early in the ramp the multiplier "
             "overstates it, and when the reference term sold out it understates it. **Last same-season final** "
             "is the better guide to how many students a course actually served.\n"
-            f"- **Likely slack** means projected fill at or below {SLACK_FILL:.0%}.\n"
+            f"- **Full now** means at least {FULL_FILL:.0%} of seats taken; **Likely to fill** means "
+            f"projected to reach {FULL_FILL:.0%}; **Likely slack** means projected fill at or below "
+            f"{SLACK_FILL:.0%}; **On track** is in between.\n"
             "- **Ref sold out**: a reference term filled its seats, so it shows what the seats held, not "
             "what students wanted.\n"
             "- Lecture and primary sections only. Cascades excluded.\n"
