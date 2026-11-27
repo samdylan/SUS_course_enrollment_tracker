@@ -54,11 +54,13 @@ def main() -> int:
                 if pd.isna(exp):
                     exp = min(proj, cap) if not pd.isna(cap) else proj
                 read = str(getattr(r, "Read", ""))
+                sc = rb.score_forecast(exp, final, cap)
                 added.append(dict(
                     term_srcdb=term, season=rb.SEASON.get(term[-2:], "?"), course=r.Course,
                     mode=r.Mode, day=int(r.day), stage=rb.stage_of(read), read=read,
                     projected=round(proj, 2), capacity_at_forecast=cap, expected=round(exp, 2),
-                    final=final, abs_pct_error=round(abs(exp - final) / final, 4), source="archive",
+                    final=final, final_at_seats=sc[0], beyond_seats=sc[1],
+                    abs_pct_error=round(sc[2], 4), source="archive",
                     method_version=getattr(r, "method_version", ""), data_as_of=str(r.data_as_of)))
     if not added:
         print("no newly scorable forecasts")

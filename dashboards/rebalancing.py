@@ -68,7 +68,7 @@ SMALL_COURSE_CAP = 30
 SNAPSHOT_HOUR_PT = 9          # nightly Action runs 17:00 UTC
 SETTLE_DAYS = 3               # days after the last relevant wave before a read is "firm"
 PT = "America/Los_Angeles"
-METHOD_VERSION = "2026-11-27 waves-v1+confidence2"
+METHOD_VERSION = "2026-11-27 waves-v1+confidence3"
 CONF_THRESHOLDS = (0.10, 0.25)  # 80th-percentile error: <=10% High, <=25% Medium, else Low
 CAL_MIN_OBS = 20                # a calibration group needs this many past forecasts...
 CAL_MIN_SERIES = 3              # ...covering at least this many course-terms
@@ -271,6 +271,25 @@ def days_bucket(d: int) -> str:
     return "1-15 days"
 
 
+def score_forecast(expected, final, capacity):
+    """Score a forecast against the seats that existed when it was made. If seats were added
+    later and filled, the forecast was right about the seats it knew of; the extra students
+    are recorded separately (beyond_seats) as evidence of demand, not counted as error."""
+    has_cap = capacity == capacity and capacity > 0
+    at_seats = min(final, capacity) if has_cap else final
+    beyond = max(final - capacity, 0) if has_cap else 0
+    err = abs(expected - at_seats) / at_seats if at_seats > 0 else np.nan
+    return at_seats, beyond, err
+
+
+def _wquantile(values, weights, q):
+    """Quantile where each value carries a weight (used so each course-term counts once)."""
+    v = np.asarray(values, float); w = np.asarray(weights, float)
+    i = np.argsort(v); v, w = v[i], w[i]
+    c = (np.cumsum(w) - 0.5 * w) / w.sum()
+    return float(np.interp(q, c, v))
+
+
 def load_error_obs(db_path: Path) -> pd.DataFrame:
     """Past forecasts scored against what happened (data/forecast_errors.csv)."""
     p = Path(db_path).parent / "forecast_errors.csv"
@@ -285,7 +304,13 @@ def load_error_obs(db_path: Path) -> pd.DataFrame:
           .drop_duplicates("_k").drop(columns=["_k", "_a"]))
     o["bucket"] = o.day.astype(int).map(days_bucket)
     o["fill"] = np.where(o.expected >= FULL_FILL * o.capacity_at_forecast, "projected full", "seats left")
-    o["signed"] = o.final / o.expected - 1
+    # (re)score every row against the seats that existed at the time of the forecast
+    sc = [score_forecast(e, f, c) for e, f, c in zip(o.expected, o.final, o.capacity_at_forecast)]
+    o["final_at_seats"] = [a for a, _, _ in sc]
+    o["beyond_seats"] = [b for _, b, _ in sc]
+    o["abs_pct_error"] = [e for _, _, e in sc]
+    o = o[o.abs_pct_error.notna()].copy()
+    o["signed"] = o.final_at_seats / o.expected - 1
     o["series"] = o.term_srcdb + "|" + o.course + "|" + o["mode"]
     return o
 
@@ -318,29 +343,15 @@ def confidence_for(obs, season, mode, stage, d, full):
             sel = sel[sel[k] == v[k]]
         if (len(sel) >= CAL_MIN_OBS and sel.series.nunique() >= CAL_MIN_SERIES
                 and sel.term_srcdb.nunique() >= CAL_MIN_TERMS):
-            p80 = float(sel.abs_pct_error.quantile(0.8))
+            w = 1.0 / sel.groupby("series").series.transform("size")   # each course-term counts once
+            p80 = _wquantile(sel.abs_pct_error, w, 0.8)
             label = ("High" if p80 <= CONF_THRESHOLDS[0]
                      else "Medium" if p80 <= CONF_THRESHOLDS[1] else "Low")
             cell = " · ".join(v[k] for k in lv) if lv else "all past forecasts"
             if st_ != stage:
                 cell += f" (borrowed for {stage})"
-            return dict(p80=p80, label=label, n=len(sel), terms=sel.term_srcdb.nunique(), cell=cell,
-                        q10=float(sel.signed.quantile(0.1)), q90=float(sel.signed.quantile(0.9)))
-    return None
-    vals = dict(season=season, mode=mode, stage=stage, bucket=days_bucket(d),
-                fill="projected full" if full else "seats left")
-    for lv in _CAL_LEVELS:
-        sel = obs
-        for k in lv:
-            sel = sel[sel[k] == vals[k]]
-        if (len(sel) >= CAL_MIN_OBS and sel.series.nunique() >= CAL_MIN_SERIES
-                and sel.term_srcdb.nunique() >= CAL_MIN_TERMS):
-            p80 = float(sel.abs_pct_error.quantile(0.8))
-            label = ("High" if p80 <= CONF_THRESHOLDS[0]
-                     else "Medium" if p80 <= CONF_THRESHOLDS[1] else "Low")
-            cell = " · ".join(vals[k] for k in lv) if lv else "all past forecasts"
-            return dict(p80=p80, label=label, n=len(sel), terms=sel.term_srcdb.nunique(), cell=cell,
-                        q10=float(sel.signed.quantile(0.1)), q90=float(sel.signed.quantile(0.9)))
+            return dict(p80=p80, label=label, n=sel.series.nunique(), terms=sel.term_srcdb.nunique(),
+                        cell=cell, q10=_wquantile(sel.signed, w, 0.1), q90=_wquantile(sel.signed, w, 0.9))
     return None
 
 
@@ -511,7 +522,7 @@ def build_projection(E, term, classes_begin: Callable[[str], Optional[pd.Timesta
             if not np.isnan(cap_now):
                 lik_hi = min(lik_hi, cap_now)
             conf_txt = f"{conf['label']} (±{conf['p80']:.0%})"
-            conf_cell = f"{conf['cell']} · {conf['n']} past forecasts, {conf['terms']} term(s)"
+            conf_cell = f"{conf['cell']} · {conf['n']} course-terms, {conf['terms']} term(s)"
         rows.append(dict(
             Course=code, Mode=mode,
             Now=f"{now:.0f}/{cap_now:.0f}" if not np.isnan(cap_now) else f"{now:.0f}",
@@ -673,10 +684,12 @@ def render_rebalancing_panel(db_path, classes_begin):
             "those past errors, so it can be lopsided. With only a few past terms it is a little "
             "optimistic: tested on terms it was not calibrated on, about 3 in 4 finals landed inside it.\n"
             "- **Confidence** labels the typical size of that error (80% of past forecasts fell within "
-            "the ± shown): High within 10%, Medium within 25%, Low beyond. Where a "
+            "the ± shown): High within 10%, Medium within 25%, Low beyond. Each past forecast is scored "
+            "against the seats that existed when it was made, so seats added later do not count as error, "
+            "and each course-term counts once however many days it was forecast. Where a "
             "group has too little history it first borrows the neighbouring stage (settling uses firm), "
             "then widens, keeping modality and full/not-full to the end; **Confidence based on** says which, "
-            "and how many past forecasts it rests on. The record (`data/forecast_errors.csv`) starts from a "
+            "and how many course-terms it rests on. The record (`data/forecast_errors.csv`) starts from a "
             "replay of the panel over past terms, and the nightly job adds every archived forecast once its "
             "term begins, so confidence recalibrates itself each term.\n"
             "- **Projected** = today's count x (reference term's final / its count at the same point), "

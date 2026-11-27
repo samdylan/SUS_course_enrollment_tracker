@@ -31,7 +31,8 @@ import osu_enrollment_dashboard_v5 as dash    # noqa: E402
 OUT = ROOT / "data" / "forecast_errors.csv"
 MIN_FINAL = 15          # tiny sections make percentage errors meaningless
 COLS = ["term_srcdb", "season", "course", "mode", "day", "stage", "read", "projected",
-        "capacity_at_forecast", "expected", "final", "abs_pct_error", "source",
+        "capacity_at_forecast", "expected", "final", "final_at_seats", "beyond_seats",
+        "abs_pct_error", "source",
         "method_version", "data_as_of"]
 
 
@@ -71,11 +72,13 @@ def backtest_term(E, term, manual, cal):
             f = fin.get((r.Course, r.Mode))
             if f is None or f < MIN_FINAL or pd.isna(r.Expected):
                 continue
+            sc = rb.score_forecast(r.Expected, f, r.Capacity)
             rows.append(dict(
                 term_srcdb=term, season=meta["season"], course=r.Course, mode=r.Mode, day=d,
                 stage=rb.stage_of(r.Read), read=r.Read, projected=round(r.Projected, 2),
                 capacity_at_forecast=r.Capacity, expected=round(r.Expected, 2), final=f,
-                abs_pct_error=round(abs(r.Expected - f) / f, 4), source="backtest",
+                final_at_seats=sc[0], beyond_seats=sc[1], abs_pct_error=round(sc[2], 4),
+                source="backtest",
                 method_version=rb.METHOD_VERSION, data_as_of=str(meta["as_of"])))
     return pd.DataFrame(rows, columns=COLS)
 
